@@ -1,0 +1,250 @@
+CHANGE_LOG
+
+For the Github commit log see here: https://github.com/jks-prv/Beagle_SDR_GPS/commits/master
+
+v1.180,181,182  Apr 24, 2018
+    Add WSPR background autorun mode.
+        See instructions on admin page, "extensions" tab, WSPR menu entry.
+
+v1.179  Apr 19, 2018
+    Fix for Chrome's new "no autoplay" audio policy. Display the "click to start OpenWebRX"
+        overlay that is used with iOS mobile devices.
+    Fix to eliminate audio glitches when a large dx list is edited/updated from the web interface.
+
+v1.176,177,178  Apr 18, 2018
+    The Kiwi GPS now receives Galileo satellites in addition to Navstar and QZSS.
+        A GPS antenna with restricted sky visibility will now have more satellites to choose from
+        and should produce position/time solutions more often.
+        Please consider attaching the GPS antenna to your Kiwi, especially if yours is a
+        public Kiwi listed on sdr.hu  This will assist with ongoing HF direction finding experiments
+        as well as serve as a source of frequency calibration for your Kiwi.
+        Thanks to Christoph Mayer for important insight and bug fixes.
+    Admin GPS tab now has Google map display.
+    Support Vivado 2017.4 for building FPGA image.
+
+v1.175  Mar 5, 2018
+    GPS fixes and improvements.
+    Include copy of bb-cape-overlay package for Debian 8.10 /dev/spidev* workaround
+
+v1.174  Feb 23, 2018
+    Display DHCP/static IP address on Beagle LEDs.
+        See kiwisdr.com/quickstart/index.html#id-leds
+
+v1.173  Feb 14, 2018
+    Check against bad GPS az/el solutions.
+
+v1.172  Feb 13, 2018
+    Respect GPS subframe alert flag. Don't include sat in position fix if alert flag is set.
+    Add "include alerted?" switch to GPS tab on admin page to override alert exclusion.
+
+v1.171  Feb 11, 2018
+    Admin GPS tab additions.
+        Shadow map. Shows long term areas of non-reception caused by "shadowing" of buildings and terrain.
+        For Asia/Oceania, a locator for the new geosynchronous QZS-3 sat will appear as a circle.
+            Combined with the shadow map this will indicate if QZS-3 is likely to be received.
+
+v1.170  Feb 8, 2018
+    Added GPS support for Japan's Quasi-Zenith Satellite System (QZSS).
+        Should have reception over entire Asia-Oceania region (heard fine in New Zealand).
+
+v1.169  Feb 6, 2018
+    Faster GPS sat acquisition (260 -> 60 msec) from Christoph Mayer.
+        Adjust bin size so power-of-two FFTs can be used.
+        Use ARM NEON SIMD instructions.
+
+v1.168  Feb 1, 2018
+    Improve speed of DX label handling.
+
+v1.167  Jan 31, 2018
+    FSK:
+        Leave zoom alone when changing shift etc.
+        Fix bug in EFR mode that makes it print “undefined”.
+
+v1.166  Jan 30, 2018
+    FSK: Add shift position markers on top of waterfall below passband.
+    WSPR: darken call/grid link colors.
+
+v1.165  Jan 28, 2018
+    Add alternate 80m and 60m WSPR frequencies.
+    Fix bug preventing inactive connection timeout from working.
+    Add custom shift and baud rate fields to FSK extension.
+
+v1.164  Jan 27, 2018
+    Catch null pointer when kiwisdr.com is down.
+    On admin sdr.hu tab, limit resolution of GPS assist lat/lon field-fill for privacy reasons. 
+
+v1.163  Jan 23, 2018
+    FSK extension:
+        EFR Teleswitch decoding improvements.
+        CHU decoding working.
+
+v1.162  Jan 22, 2018
+    FSK extension: support for EFR Teleswitch stations (130-140 kHz in Europe).
+
+v1.161  Jan 21, 2018
+    Actually enable the FSK extension.
+        Add more baud and shift values to menus.
+        Improvements to the framing tool.
+
+v1.160  Jan 20, 2018
+    Fixed FSK menu bug.
+
+v1.159  Jan 20, 2018
+    Navtex: add frequency to DX mode, next/prev menu entry buttons.
+    Added FSK extension. A work in progress. Not all framing modes seem to work.
+
+v1.158  Jan 17, 2018
+    Add Navtex DX mode. Each new message prints a single line containing a timestamp,
+        header information and the first 80 characters of the message.
+
+v1.157  Jan 16, 2018
+    Fix user display on admin status tab
+    Add volume URL parameter, e.g. kiwisdr:8073/?vol=100
+        vol = 0 to 200(%), default is 50%
+
+v1.156  Jan 12, 2018
+    Fixed FAX frequencies: Athens (way off) and Northwood UK 4 MHz (100 Hz error).
+    Added GPS tracking PLL IQ display to admin interface.
+    Added scope display to Navtex extension.
+
+v1.155  Jan 3, 2018
+    Navtex extension:
+        Add baud error indicator.
+        Add HF frequencies menu.
+        Text window clear button.
+        Mark/space invert checkbox.
+    Another fix to NDB database lookup function.
+    API fix for antenna switch extension.
+
+v1.154  Jan 2, 2018
+    New Navtex extension.
+    Major user interface changes:
+        New “option tab” user interface for lower right control panel.
+        Removed lower left status panel. Replaced with the new "Users" and "Stats" option tabs.
+        Next/previous history buttons next to frequency entry box.
+            If using a keyboard press return key to select displayed frequency.
+            Otherwise prior frequency will return after three seconds.
+            Doesn't really work yet for mobile devices.
+        Added numeric dBm value to S-meter.
+        Added classic LMS denoiser and autonotch to audio tab. Filter controls on extension panel.
+            The LMS filters are not a panacea for all filtering problems.
+            They are tricky to adjust and don't work in all situations.
+            The presets are a work-in-progress.
+        Added audio mute icon/button to right of spectrum button (renamed "Spec" to fit).
+        WF option tab
+            Number after "WF" on option tab button is current zoom level, e.g. "WF10"
+            "Auto Scale" button: automatically sets WF min/max.
+                Best when there are a range of signal levels.
+            "Slow Dev" button: Use when you have audio drops on slow mobile devices (e.g. old iPad).
+                Uses single color in spectrum and slower waterfall speed.
+            "colormap" & "contrast" menus: beginnings of waterfall colormap control. Work-in-progress.
+            "spec filter" menu: variable spectrum time constant so decay time can be varied.
+        Add URL parameter to set initial waterfall speed:
+            wf={0, off, 1, 1hz, s, slow, m, med, f, fast} e.g. kiwi:8073/?wf=1hz
+        Fixed problem with NDB database lookup not working.
+        Removed “less buffering” and “compression” buttons from Audio tab until they are working.
+
+v1.153  Dec 7, 2017
+    Add threshold slider to noise blanker.
+
+v1.152  Dec 6, 2017
+    First attempt at adding a noise blanker.
+    Added variable speed waterfall ("WF rate" slider)
+    Now on extended control panel, via "more" button:
+        The "WF max" slider.
+        Sound "Less buffering" (formerly "SND") and "Compression" buttons.
+    Loran-C extension: fix truncated display for larger GRI values.
+
+v1.151  Nov 25, 2017
+    Adds GPS-derived timestamp in IQ mode (contributed patch)
+
+v1.150  Nov 22, 2017
+    Fix broken menu selections on admin page.
+    Added "always acquire" switch to GPS tab of admin page.
+
+v1.149  Nov 22, 2017
+    Connect to geolocation servers using https for benefit of Kiwis behind https/ssl proxies (contributed patch)
+    Fixed problem with Kiwi server geolocation of user connections randomly failing.
+    Added a "continue anyway" button to the javascript version mismatch dialog.
+
+v1.148  Nov 21, 2017
+    Fix timestamp wrong latch clock.
+
+v1.147  Nov 21, 2017
+    When setting static ip address allow DNS servers to be specified.
+    Fix timestamp in audio IQ stream.
+
+v1.146  Nov 18, 2017
+    IBP scanner iPad problem fixed.
+
+v1.145  Nov 18, 2017
+    Reverted last IBP scanner commit due to problems on iPad.
+
+v1.144  Nov 17, 2017
+    Improvements to IBP scanner extension from VE3SUN (see http://ve3sun.com/KiwiSDR/IBP)
+    Automatically position extension data display when browser window resized.
+
+v1.143  Nov 13, 2017
+    Added this CHANGE_LOG file.
+    Fixed crash caused when invalid numeric entries used in label edit panel.
+    Stop IBP_scan waterfall annotations after extension closed.
+
+v1.142  Nov 12, 2017
+    New repository https://github.com/jks-prv/Beagle_GPS
+    A version of KiwiSDR with the SDR code removed for people who only want to experiment with GPS.
+    Easier to understand and compiles faster than full KiwiSDR repo.
+    Except for the FPGA simulation, this is a replacement for http://www.jks.com/sdgps/sdgps.html
+
+v1.141  Nov 7, 2017
+    Admin webpage tab has textarea input for HTML that is added to the <head> element of
+    the main page. Useful to add for example Javascript to setup Google analytics.
+
+v1.140  Nov 1, 2017
+    Bug fix allowing IQ mode in labels (kiwi.config/dx.json file).
+
+v1.139  Nov 1, 2017
+    New IQ demodulator mode (button to the right of NBFM) that, among other things, allows
+    DRM decoding using the external Dream application. Requires use of
+    "virtual audio cable" software on your computer to route the browser audio output to the
+    input of Dream or other app. See the KiwiSDR forum for details.
+
+v1.138  Oct 25, 2017
+    Improvements from VE3SUN:
+        IBP: Waterfall annotation of IBP station callsign.
+        IBP: Waterfall autosave to jpg file.
+        "DX cluster lookup" right-button menu entry.
+        25-entry last frequency memory. Use keyboard up/down keys to access.
+
+v1.137  Oct 16, 2017
+    Security improvements:
+        No more storage of admin password in cookies.
+        Create file kiwi.config/opt.no_console to disable root console capability completely.
+        File kiwi.config/opt.admin_ip can limit admin connections to single ipv4/ipv6 address
+        on the local network (put ip address in file).
+        Note: for security reasons it makes no sense to put these options _in_ the admin webpage.
+
+v1.136  Oct 11, 2017
+    Update needed because kiwisdr.com moved to a new server.
+
+v1.135  Oct 8, 2017
+    Bug fix in time limit exemption password code.
+
+v1.134  Oct 8, 2017
+    Bug fix in time limit code.
+
+v1.133  Oct 8, 2017
+    Fix top bar congestion. As the window width is narrowed (or for small screen devices) items
+    on the top bar will be removed. Before the items would overlap making them unreadable.
+
+v1.132  Oct 2, 2017
+    Bug fix.
+
+v1.131  Oct 2, 2017
+    Added 24hr per-ip address connect time limit to admin interface. Now you can limit how long
+    a particular ip address can connect during a 24 hour period.
+    Fixed S-meter residual color problem.
+
+v1.130  Sep 30, 2017
+    Added a GPS Azimuth/Elevation display option.
+    
+TODO: earlier releases

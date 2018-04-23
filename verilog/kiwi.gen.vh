@@ -5,39 +5,45 @@
 
 // from assembler DEF directives:
 
+`define SDR_GPS_BUILD    // DEFh 0x1
+//`define GPS_ONLY_BUILD    // DEFh 0x0
+`define ARTIX_7A35    // DEFh 0x1
+//`define ZYNQ_7007    // DEFh 0x0
 	localparam FPGA_VER = 4'd1;    // DEFp 0x1
 `define DEF_FPGA_VER
 	localparam FW_ID = 20480;    // DEFp 0x5000
 `define DEF_FW_ID
 	localparam ADC_BITS = 14;    // DEFp 0xe
 `define DEF_ADC_BITS
-	localparam NUM_CMDS = 36;    // DEFp 0x24
-`define DEF_NUM_CMDS
 	localparam DEFAULT_NSYNC = 2;    // DEFp 0x2
 `define DEF_DEFAULT_NSYNC
-`define USE_CPU_MULT    // DEFh 0x1
 `define USE_MIX_DDS    // DEFh 0x1
-`define USE_GEN    // DEFh 0x1
+//`define USE_GEN    // DEFh 0x0
 //`define USE_HBEAT    // DEFh 0x0
-//`define USE_LOGGER    // DEFh 0x0
+`define USE_LOGGER    // DEFh 0x1
 `define USE_CPU_CTR    // DEFh 0x1
 `define USE_DEBUG    // DEFh 0x1
 `define USE_VIVADO    // DEFh 0x1
-`define ARTIX_7    // DEFh 0x1
+`define SERIES_7    // DEFh 0x1
 //`define QUICK_BUILD    // DEFh 0x0
 //`define SPI_PUMP_CHECK    // DEFh 0x0
 //`define STACK_CHECK    // DEFh 0x0
 //`define SND_SEQ_CHECK    // DEFh 0x0
 //`define SND_TIMING_CK    // DEFh 0x0
 `define SPI_32    // DEFh 0x1
+//`define MEAS_CIC_OUT    // DEFh 0x0
+	localparam NUM_CMDS = 41;    // DEFp 0x29
+`define DEF_NUM_CMDS
 	localparam GPS_CHANS = 12;    // DEFp 0xc
 `define DEF_GPS_CHANS
+	localparam GALILEO_CHANS = 4;    // DEFp 0x4
+`define DEF_GALILEO_CHANS
 	localparam RX_CHANS = 4;    // DEFp 0x4
 `define DEF_RX_CHANS
 	localparam WF_CHANS = 4;    // DEFp 0x4
 `define DEF_WF_CHANS
-	localparam FPGA_ID = 4'd3;    // DEFp 0x3
-`define DEF_FPGA_ID
+	localparam FPGA_ID1 = 4'd3;    // DEFp 0x3
+`define DEF_FPGA_ID1
 //`define USE_RX_SEQ    // DEFh 0x0
 `define SND_12000    // DEFh 0x1
 //`define SND_9600    // DEFh 0x0
@@ -95,12 +101,34 @@
 `define DEF_WF_1CIC_MAXD
 	localparam WF_2CIC_MAXD = 0;    // DEFp 0x0
 //`define DEF_WF_2CIC_MAXD
-	localparam MAX_NAV_BITS = 64;    // DEFp 0x40
+	localparam E1B_MODE = 2048;    // DEFp 0x800
+`define DEF_E1B_MODE
+	localparam GPS_INTEG_BITS = 20;    // DEFp 0x14
+`define DEF_GPS_INTEG_BITS
+	localparam FPGA_ID2 = 4'd0;    // DEFp 0x0
+//`define DEF_FPGA_ID2
+	localparam GPS_REPL_BITS = 18;    // DEFp 0x12
+`define DEF_GPS_REPL_BITS
+	localparam MAX_NAV_BITS = 128;    // DEFp 0x80
 `define DEF_MAX_NAV_BITS
 	localparam GPS_SAMPS = 256;    // DEFp 0x100
 `define DEF_GPS_SAMPS
+	localparam GPS_IQ_SAMPS = 255;    // DEFp 0xff
+`define DEF_GPS_IQ_SAMPS
+	localparam GPS_IQ_SAMPS_W = 1020;    // DEFp 0x3fc
+`define DEF_GPS_IQ_SAMPS_W
+	localparam L1_CODEBITS = 10;    // DEFp 0xa
+`define DEF_L1_CODEBITS
+	localparam L1_CODELEN = 1023;    // DEFp 0x3ff
+`define DEF_L1_CODELEN
+	localparam E1B_CODEBITS = 12;    // DEFp 0xc
+`define DEF_E1B_CODEBITS
+	localparam E1B_CODELEN = 4092;    // DEFp 0xffc
+`define DEF_E1B_CODELEN
 	localparam NADC_SAMPS = 512;    // DEFp 0x200
 `define DEF_NADC_SAMPS
+	localparam FPGA_ID = 3;    // DEFp 0x3
+`define DEF_FPGA_ID
 	localparam GET_CHAN_IQ = 0;    // DEFb: bit number for value: 0x1
 	localparam GET_SRQ = 1;    // DEFb: bit number for value: 0x2
 	localparam GET_SNAPSHOT = 2;    // DEFb: bit number for value: 0x4
@@ -114,10 +142,11 @@
 	localparam HOST_TX = 0;    // DEFb: bit number for value: 0x1
 	localparam SET_MASK = 1;    // DEFb: bit number for value: 0x2
 	localparam SET_CHAN = 2;    // DEFb: bit number for value: 0x4
-	localparam SET_CA_NCO = 3;    // DEFb: bit number for value: 0x8
+	localparam SET_CG_NCO = 3;    // DEFb: bit number for value: 0x8
 	localparam SET_LO_NCO = 4;    // DEFb: bit number for value: 0x10
-	localparam SET_SV = 5;    // DEFb: bit number for value: 0x20
-	localparam SET_PAUSE = 6;    // DEFb: bit number for value: 0x40
+	localparam SET_SAT = 5;    // DEFb: bit number for value: 0x20
+	localparam SET_E1B_CODE = 6;    // DEFb: bit number for value: 0x40
+	localparam SET_PAUSE = 7;    // DEFb: bit number for value: 0x80
 	localparam SET_CTRL = 0;    // DEFb: bit number for value: 0x1
 	localparam SET_RX_CHAN = 1;    // DEFb: bit number for value: 0x2
 	localparam SET_RX_FREQ = 2;    // DEFb: bit number for value: 0x4
@@ -136,9 +165,6 @@
 	localparam GET_LOG = 5;    // DEFb: bit number for value: 0x20
 	localparam PUT_LOG = 6;    // DEFb: bit number for value: 0x40
 	localparam LOG_RST = 7;    // DEFb: bit number for value: 0x80
-	localparam CPU_CTR_CLR = 8;    // DEFb: bit number for value: 0x100
-	localparam CPU_CTR_ENA = 9;    // DEFb: bit number for value: 0x200
-	localparam CPU_CTR_DIS = 10;    // DEFb: bit number for value: 0x400
 	localparam GET_RX_SAMP = 0;    // DEFb: bit number for value: 0x1
 	localparam RX_BUFFER_RST = 1;    // DEFb: bit number for value: 0x2
 	localparam RX_GET_BUF_CTR = 2;    // DEFb: bit number for value: 0x4
@@ -147,14 +173,18 @@
 	localparam GET_WF_SAMP_Q = 5;    // DEFb: bit number for value: 0x20
 	localparam CLR_RX_OVFL = 6;    // DEFb: bit number for value: 0x40
 	localparam FREEZE_TOS = 7;    // DEFb: bit number for value: 0x80
+	localparam CPU_CTR_CLR = 8;    // DEFb: bit number for value: 0x100
+	localparam CPU_CTR_ENA = 9;    // DEFb: bit number for value: 0x200
+	localparam CPU_CTR_DIS = 10;    // DEFb: bit number for value: 0x400
 	localparam WF_SAMP_RD_RST = 0;    // DEFb: bit number for value: 0x1
 	localparam WF_SAMP_WR_RST = 1;    // DEFb: bit number for value: 0x2
 	localparam WF_SAMP_CONTIN = 2;    // DEFb: bit number for value: 0x4
 	localparam WF_SAMP_SYNC = 3;    // DEFb: bit number for value: 0x8
 	localparam STAT_FPGA_ID = 15;    // DEFp 0xf
 `define DEF_STAT_FPGA_ID
-	localparam STAT_CLOCK_ID = 240;    // DEFp 0xf0
-`define DEF_STAT_CLOCK_ID
+	localparam STAT_USER = 240;    // DEFp 0xf0
+`define DEF_STAT_USER
+	localparam STAT_DNA_DATA = 4;    // DEFb: bit number for value: 0x10
 	localparam STAT_FPGA_VER = 3840;    // DEFp 0xf00
 `define DEF_STAT_FPGA_VER
 	localparam STAT_FW_ID = 28672;    // DEFp 0x7000
@@ -162,10 +192,13 @@
 	localparam STAT_OVFL = 15;    // DEFb: bit number for value: 0x8000
 	localparam CTRL_OSC_EN = 8;    // DEFb: bit number for value: 0x100
 	localparam CTRL_EEPROM_WP = 9;    // DEFb: bit number for value: 0x200
+`define HEARTBEAT_IND    // DEFh 0x200
 	localparam CTRL_USE_GEN = 10;    // DEFb: bit number for value: 0x400
 	localparam CTRL_TEST_MODE = 11;    // DEFb: bit number for value: 0x800
+	localparam CTRL_UNUSED_OUT = 11;    // DEFb: bit number for value: 0x800
 	localparam CTRL_INTERRUPT = 12;    // DEFb: bit number for value: 0x1000
-`define HEARTBEAT_IND    // DEFh 0x200
-	localparam CTRL_UNUSED_OUT = 15;    // DEFb: bit number for value: 0x8000
+	localparam CTRL_DNA_READ = 13;    // DEFb: bit number for value: 0x2000
+	localparam CTRL_DNA_SHIFT = 14;    // DEFb: bit number for value: 0x4000
+	localparam CTRL_DNA_CLK = 15;    // DEFb: bit number for value: 0x8000
 
 `endif

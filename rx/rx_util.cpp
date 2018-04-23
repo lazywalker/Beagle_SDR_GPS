@@ -29,10 +29,7 @@ Boston, MA  02110-1301, USA.
 #include "spi.h"
 #include "gps.h"
 #include "cfg.h"
-#include "dx.h"
 #include "coroutines.h"
-#include "data_pump.h"
-#include "ext_int.h"
 #include "net.h"
 #include "clk.h"
 
@@ -112,9 +109,10 @@ void cfg_adm_transition()
 	cfg_save_json(cfg_cfg.json);
 }
 
-int inactivity_timeout_mins;
+int inactivity_timeout_mins, ip_limit_mins;
 int S_meter_cal;
-double ui_srate;
+double ui_srate, freq_offset;
+int sdr_hu_lo_kHz, sdr_hu_hi_kHz;
 
 #define DC_OFFSET_DEFAULT -0.02
 #define DC_OFFSET_DEFAULT_PREV 0.05
@@ -136,6 +134,7 @@ void update_vars_from_config()
 	//  Creates configuration parameters with default values that must exist for client connections.
 
     inactivity_timeout_mins = cfg_default_int("inactivity_timeout_mins", 0, &update_cfg);
+    ip_limit_mins = cfg_default_int("ip_limit_mins", 0, &update_cfg);
 
     int srate_idx = cfg_default_int("max_freq", 0, &update_cfg);
 	ui_srate = srate_idx? 32*MHz : 30*MHz;
@@ -156,7 +155,11 @@ void update_vars_from_config()
         lprintf("DC_offset_Q: no cfg or prev default, setting to default value\n");
         update_cfg = true;
     }
-    lprintf("using DC_offsets: I %.6f Q %.6f\n", DC_offset_I, DC_offset_Q);
+    static bool dc_off_msg;
+    if (!dc_off_msg) {
+        lprintf("using DC_offsets: I %.6f Q %.6f\n", DC_offset_I, DC_offset_Q);
+        dc_off_msg = true;
+    }
 
     S_meter_cal = cfg_default_int("S_meter_cal", SMETER_CALIBRATION_DEFAULT, &update_cfg);
     cfg_default_int("waterfall_cal", WATERFALL_CALIBRATION_DEFAULT, &update_cfg);
@@ -165,6 +168,22 @@ void update_vars_from_config()
     cfg_default_string("owner_info", "", &update_cfg);
     cfg_default_int("WSPR.autorun", 0, &update_cfg);
     cfg_default_int("clk_adj", 0, &update_cfg);
+    cfg_default_int("sdr_hu_dom_sel", 0, &update_cfg);
+    freq_offset = cfg_default_float("freq_offset", 0, &update_cfg);
+    sdr_hu_lo_kHz = cfg_default_int("sdr_hu_lo_kHz", 0, &update_cfg);
+    sdr_hu_hi_kHz = cfg_default_int("sdr_hu_hi_kHz", 30000, &update_cfg);
+    cfg_default_bool("index_html_params.RX_PHOTO_LEFT_MARGIN", true, &update_cfg);
+    cfg_default_string("index_html_params.HTML_HEAD", "", &update_cfg);
+    cfg_default_string("tlimit_exempt_pwd", "", &update_cfg);
+    
+    // fix corruption left by v1.131 dotdot bug
+    _cfg_int(&cfg_cfg, "WSPR.autorun", &err, CFG_OPTIONAL|CFG_NO_DOT);
+    if (!err) {
+        _cfg_set_int(&cfg_cfg, "WSPR.autorun", 0, CFG_REMOVE|CFG_NO_DOT, 0);
+        _cfg_set_bool(&cfg_cfg, "index_html_params.RX_PHOTO_LEFT_MARGIN", 0, CFG_REMOVE|CFG_NO_DOT, 0);
+        printf("removed v1.131 dotdot bug corruption\n");
+        update_cfg = true;
+    }
 
 	if (update_cfg)
 		cfg_save_json(cfg_cfg.json);
@@ -184,6 +203,17 @@ void update_vars_from_config()
     admcfg_default_int("duc_update", 3, &update_admcfg);
     admcfg_default_bool("daily_restart", false, &update_admcfg);
     admcfg_default_int("update_restart", 0, &update_admcfg);
+    admcfg_default_string("ip_address.dns1", "8.8.8.8", &update_admcfg);
+    admcfg_default_string("ip_address.dns2", "8.8.4.4", &update_admcfg);
+    admcfg_default_bool("always_acq_gps", false, &update_admcfg);
+    admcfg_default_bool("include_alert_gps", false, &update_admcfg);
+    admcfg_default_bool("include_E1B", true, &update_admcfg);
+    admcfg_default_int("survey", 0, &update_admcfg);
+    admcfg_default_int("E1B_offset", 4, &update_admcfg);
+    admcfg_default_bool("plot_E1B", false, &update_admcfg);
+
+    // FIXME: resolve problem of ip_address.xxx vs ip_address:{xxx} in .json files
+    //admcfg_default_bool("ip_address.use_static", false, &update_admcfg);
 
 	if (update_admcfg)
 		admcfg_save_json(cfg_adm.json);
@@ -196,7 +226,9 @@ void update_vars_from_config()
         int clk_adj = cfg_int("clk_adj", &err, CFG_OPTIONAL);
         if (err == false) {
             printf("INITIAL clk_adj=%d\n", clk_adj);
-            if (clk_adj) clock_manual_adj(clk_adj);
+            if (clk_adj != 0) {
+                clock_manual_adj(clk_adj);
+            }
         }
         initial_clk_adj = true;
     }
@@ -205,18 +237,19 @@ void update_vars_from_config()
 static void geoloc_task(void *param)
 {
 	conn_t *conn = (conn_t *) param;
-	int n, stat;
+	int stat;
 	char *cmd_p, *reply;
+	
+	char *ip = (isLocal_ip(conn->remote_ip) && ddns.pub_valid)? ddns.ip_pub : conn->remote_ip;
 
-    asprintf(&cmd_p, "curl -s \"freegeoip.net/json/%s\" 2>&1", conn->remote_ip);
-    //asprintf(&cmd_p, "curl -s \"freegeoip.net/json/::ffff:103.26.16.225\" 2>&1");
+    asprintf(&cmd_p, "curl -s --ipv4 \"freegeoip.net/json/%s\" 2>&1", ip);
     cprintf(conn, "GEOLOC: <%s>\n", cmd_p);
     
     reply = non_blocking_cmd(cmd_p, &stat);
     free(cmd_p);
     
-    if (stat < 0 || WEXITSTATUS(stat) != 0 || n <= 0) {
-        clprintf(conn, "GEOLOC: failed for %s\n", conn->remote_ip);
+    if (stat < 0 || WEXITSTATUS(stat) != 0) {
+        clprintf(conn, "GEOLOC: failed for %s\n", ip);
         kstr_free(reply);
         return;
     }
@@ -245,7 +278,7 @@ static void geoloc_task(void *param)
     geo = kstr_cat(geo, has_city? ", " : "");
     geo = kstr_cat(geo, country);   // NB: country freed here
 
-    clprintf(conn, "GEOLOC: %s <%s>\n", conn->remote_ip, kstr_sp(geo));
+    clprintf(conn, "GEOLOC: %s <%s>\n", ip, kstr_sp(geo));
     conn->geo = strdup(kstr_sp(geo));
     kstr_free(geo);
 
@@ -258,7 +291,7 @@ static void geoloc_task(void *param)
 int current_nusers;
 static int last_hour = -1, last_min = -1;
 
-// called periodically
+// called periodically (currently every 10 seconds)
 void webserver_collect_print_stats(int print)
 {
 	int i, nusers=0;
@@ -272,21 +305,36 @@ void webserver_collect_print_stats(int print)
 		if (c->freqHz != c->last_freqHz || c->mode != c->last_mode || c->zoom != c->last_zoom) {
 			if (print) loguser(c, LOG_UPDATE);
 			c->last_tune_time = now;
+            c->last_freqHz = c->freqHz;
+            c->last_mode = c->mode;
+            c->last_zoom = c->zoom;
+            c->last_log_time = now;
 		} else {
 			u4_t diff = now - c->last_log_time;
 			if (diff > MINUTES_TO_SEC(5)) {
 				if (print) loguser(c, LOG_UPDATE_NC);
 			}
 			
-			if (!c->inactivity_timeout_override && (inactivity_timeout_mins != 0) && !c->isLocal) {
+			//cprintf(c, "oride=%d TO_MINS=%d exempt=%d\n", c->inactivity_timeout_override, inactivity_timeout_mins, c->tlimit_exempt);
+			if (!c->inactivity_timeout_override && (inactivity_timeout_mins != 0) && !c->tlimit_exempt) {
 				diff = now - c->last_tune_time;
-				if (diff > MINUTES_TO_SEC(inactivity_timeout_mins) && !c->inactivity_msg_sent) {
-					send_msg(c, false, "MSG inactivity_timeout_msg=%d", inactivity_timeout_mins);
-					c->inactivity_msg_sent = true;
-				}
-				if (diff > (MINUTES_TO_SEC(inactivity_timeout_mins) + INACTIVITY_WARNING_SECS)) {
+			    //cprintf(c, "diff=%d TO_SECS=%d\n", diff, MINUTES_TO_SEC(inactivity_timeout_mins));
+				if (diff > MINUTES_TO_SEC(inactivity_timeout_mins)) {
+                    cprintf(c, "TLIMIT-INACTIVE for %s\n", c->remote_ip);
+					send_msg(c, false, "MSG inactivity_timeout=%d", inactivity_timeout_mins);
 					c->inactivity_timeout = true;
 				}
+			}
+		}
+		
+		if (ip_limit_mins && !c->tlimit_exempt) {
+		    c->ipl_cur_secs += STATS_INTERVAL_SECS;
+			json_set_int(&cfg_ipl, c->remote_ip, SEC_TO_MINUTES(c->ipl_cur_secs));
+			if (c->ipl_cur_secs >= MINUTES_TO_SEC(ip_limit_mins)) {
+                cprintf(c, "TLIMIT-IP connected LIMIT REACHED cur:%d >= lim:%d for %s\n",
+                    SEC_TO_MINUTES(c->ipl_cur_secs), ip_limit_mins, c->remote_ip);
+		        send_msg_encoded(c, "MSG", "ip_limit", "%d,%s", ip_limit_mins, c->remote_ip);
+                c->inactivity_timeout = true;
 			}
 		}
 		

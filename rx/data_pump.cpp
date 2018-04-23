@@ -55,6 +55,7 @@ struct rx_data_t {
 static TYPEREAL rescale;
 int audio_dropped;
 u4_t dpump_resets, dpump_hist[NRX_BUFS];
+static u4_t last_run_us;
 
 #ifdef SND_SEQ_CHECK
 	static bool initial_seq;
@@ -71,6 +72,7 @@ static void snd_service()
 
 	u4_t diff, moved=0;
 
+    evLatency(EC_EVENT, EV_DPUMP, 0, "DATAPUMP", "snd_service() BEGIN");
     do {
 
         #ifdef SND_SEQ_CHECK
@@ -131,6 +133,20 @@ static void snd_service()
     
         rx_iq_t *iqp = (rx_iq_t*) &rxd->iq_t;
     
+        #if 0
+            // check 48-bit ticks counter timestamp
+            static int debug_ticks;
+            if (debug_ticks >= 1024 && debug_ticks < 1024+8) {
+                for (int j=-1; j>-2; j--)
+                    printf("debug_iq3 %d %d %02d%04x %02d%04x\n", j, NRX_SAMPS*RX_CHANS+j,
+                        rxd->iq_t[NRX_SAMPS*RX_CHANS+j].i3, rxd->iq_t[NRX_SAMPS*RX_CHANS+j].i,
+                        rxd->iq_t[NRX_SAMPS*RX_CHANS+j].q3, rxd->iq_t[NRX_SAMPS*RX_CHANS+j].q);
+                printf("debug_ticks %04x[0] %04x[1] %04x[2]\n", rxd->ticks[0], rxd->ticks[1], rxd->ticks[2]);
+                printf("debug_bufcnt %04x\n", rxd->write_ctr_stored);
+            }
+            debug_ticks++;
+        #endif
+                
         for (j=0; j<NRX_SAMPS; j++) {
     
             for (int ch=0; ch < RX_CHANS; ch++) {
@@ -152,10 +168,8 @@ static void snd_service()
         for (int ch=0; ch < RX_CHANS; ch++) {
             if (rx_channels[ch].enabled) {
                 rx_dpump_t *rx = &rx_dpump[ch];
-    
-                rx->ticks[rx->wr_pos][0] = rxd->ticks[0];
-                rx->ticks[rx->wr_pos][1] = rxd->ticks[1];
-                rx->ticks[rx->wr_pos][2] = rxd->ticks[2];
+
+                rx->ticks[rx->wr_pos] = S16x4_S64(0, rxd->ticks[2], rxd->ticks[1], rxd->ticks[0]);
     
                 #ifdef SND_SEQ_CHECK
                     rx->in_seq[rx->wr_pos] = snd_seq;
@@ -173,15 +187,22 @@ static void snd_service()
             diff = (0xffff - stored) + current;
         }
         
+        evLatency(EC_EVENT, EV_DPUMP, 0, "DATAPUMP", evprintf("MOVED %d diff %d sto %d cur %d %.3f msec",
+            moved, diff, stored, current, (timer_us() - last_run_us)/1e3));
+        
         if (diff > (NRX_BUFS-1)) {
 		    dpump_resets++;
-		    //lprintf("DATAPUMP RESET #%d\n", dpump_resets);
-		    #if 0
-            if (ev_dump && dpump_resets > 1) {
-                evLatency(EC_DUMP, EV_DPUMP, ev_dump, "DATAPUMP", evprintf("DUMP in %.3f sec", ev_dump/1000.0));
-            }
+		    
+		    // dump on excessive latency between runs
+		    #if 1 and defined(EV_MEAS_LATENCY)
+                //if (ev_dump /*&& dpump_resets > 1*/) {
+                u4_t last = timer_us() - last_run_us;
+                if (ev_dump && last_run_us != 0 && last >= 40000) {
+                    evLatency(EC_DUMP, EV_DPUMP, ev_dump, "DATAPUMP", evprintf("DUMP in %.3f sec", ev_dump/1000.0));
+                }
             #endif
-            lprintf("DATAPUMP RESET #%d %d %d %d\n", dpump_resets, diff, stored, current);
+            
+            lprintf("DATAPUMP RESET #%d %d %d %d %.3f msec\n", dpump_resets, diff, stored, current, (timer_us() - last_run_us)/1e3);
 		    memset(dpump_hist, 0, sizeof(dpump_hist));
             spi_set(CmdSetRXNsamps, NRX_SAMPS);
             diff = 0;
@@ -194,67 +215,15 @@ static void snd_service()
             }
         }
         
+        last_run_us = timer_us();
+        
+        if (!itask_run) {
+            spi_set(CmdSetRXNsamps, 0);
+            ctrl_clr_set(CTRL_INTERRUPT, 0);
+        }
     } while (diff > 1);
-    evLatency(EC_EVENT, EV_DPUMP, ev_dump, "DATAPUMP", evprintf("MOVED %d", moved));
+    evLatency(EC_EVENT, EV_DPUMP, 0, "DATAPUMP", evprintf("MOVED %d", moved));
 
-}
-
-bool rx_dpump_run;
-
-void rx_enable(int chan, rx_chan_action_e action)
-{
-	rx_chan_t *rx = &rx_channels[chan];
-	
-	switch (action) {
-
-	case RX_CHAN_ENABLE: rx->enabled = true; break;
-	case RX_CHAN_DISABLE: rx->enabled = false; break;
-	case RX_CHAN_FREE: memset(rx, 0, sizeof(rx_chan_t)); break;
-	default: panic("rx_enable"); break;
-
-	}
-
-	bool no_users = true;
-	for (int i = 0; i < RX_CHANS; i++) {
-		rx = &rx_channels[i];
-		if (rx->enabled) {
-			no_users = false;
-			break;
-		}
-	}
-	
-	// stop the data pump when the last user leaves
-	if (rx_dpump_run && no_users) {
-		rx_dpump_run = false;
-		spi_set(CmdSetRXNsamps, 0);
-		ctrl_clr_set(CTRL_INTERRUPT, 0);
-		//printf("#### STOP dpump\n");
-	}
-
-	// start the data pump when the first user arrives
-	if (!rx_dpump_run && !no_users) {
-		rx_dpump_run = true;
-		ctrl_clr_set(CTRL_INTERRUPT, 0);
-		spi_set(CmdSetRXNsamps, NRX_SAMPS);
-		//printf("#### START dpump\n");
-	}
-}
-
-int rx_chan_free(int *idx)
-{
-	int i, free_cnt = 0, free_idx = -1;
-	rx_chan_t *rx;
-
-	for (i = 0; i < RX_CHANS; i++) {
-		rx = &rx_channels[i];
-		if (!rx->busy) {
-			free_cnt++;
-			if (free_idx == -1) free_idx = i;
-		}
-	}
-	
-	if (idx != NULL) *idx = free_idx;
-	return free_cnt;
 }
 
 static void data_pump(void *param)
@@ -284,6 +253,38 @@ static void data_pump(void *param)
 			}
 		}
 	}
+}
+
+void data_pump_start_stop()
+{
+#if RX_CHANS
+	bool no_users = true;
+	for (int i = 0; i < RX_CHANS; i++) {
+        rx_chan_t *rx = &rx_channels[i];
+		if (rx->enabled) {
+			no_users = false;
+			break;
+		}
+	}
+	
+	// stop the data pump when the last user leaves
+	if (itask_run && no_users) {
+		itask_run = false;
+		spi_set(CmdSetRXNsamps, 0);
+		ctrl_clr_set(CTRL_INTERRUPT, 0);
+		//printf("#### STOP dpump\n");
+		last_run_us = 0;
+	}
+
+	// start the data pump when the first user arrives
+	if (!itask_run && !no_users) {
+		itask_run = true;
+		ctrl_clr_set(CTRL_INTERRUPT, 0);
+		spi_set(CmdSetRXNsamps, NRX_SAMPS);
+		//printf("#### START dpump\n");
+		last_run_us = 0;
+	}
+#endif
 }
 
 void data_pump_init()

@@ -27,8 +27,9 @@ This file is part of OpenWebRX.
 		<meta charset="utf-8">
 
 		<script type="text/javascript">
-			// Local variables
+			/* Local variables */
 			var RX_PHOTO_HEIGHT = %[RX_PHOTO_HEIGHT];
+			var RX_PHOTO_LEFT_MARGIN = %[RX_PHOTO_LEFT_MARGIN];
 		</script>
 		
 		<link rel="stylesheet" type="text/css" href="pkgs/w3.css" />
@@ -38,7 +39,7 @@ This file is part of OpenWebRX.
 		<link rel="stylesheet" type="text/css" href="kiwi/kiwi.css" />
 
 		<script type="text/javascript">
-			// must be before inclusion of any .js files
+			/* must be before inclusion of any .js files below */
 			var kiwi_check_js_version = [];
 		</script>
 		
@@ -56,11 +57,14 @@ This file is part of OpenWebRX.
 
 		<!-- load javascript and CSS of the extensions -->
 		%[EXT_LIST_JS]
+
+		<!-- load HTML/javascript from admin config (e.g. for Google analytics code) -->
+		%[HTML_HEAD]
 	</head>
 
-	<body>
+	<body class="id-kiwi-body">
 
-<div id="id-kiwi-msg-container">
+<div class="id-kiwi-msg-container">
 	<div id="id-kiwi-msg-logo-container">
 		<a href="http://bluebison.net" target="_blank"><img id="id-left-logo" src="gfx/kiwi-with-headphones.51x67.png" /></a>
 		<div id="id-left-logo-text"><a href="http://bluebison.net" target="_blank">&copy; bluebison.net</a></div>
@@ -68,13 +72,13 @@ This file is part of OpenWebRX.
 	<div id="id-kiwi-msg"></div>
 </div>
 
-<div id="id-kiwi-container" data-type="kiwi" style="display:none">
+<div class="id-kiwi-container" data-type="kiwi">
 
 	<div id="id-top-container">
 		<div id="id-top-photo-clip">
 			<div id="id-top-photo-spacer"></div>
 			<div id="id-top-photo">
-				<img class="class-top-photo" src="%[RX_PHOTO_FILE]" alt="%[RX_PHOTO_DESC]" title="%[RX_PHOTO_DESC]">
+				<img id="id-top-photo-img" src="%[RX_PHOTO_FILE]" alt="%[RX_PHOTO_DESC]" title="%[RX_PHOTO_DESC]" onclick="toggle_rx_photo();">
 			</div>
 			<div id="id-rx-photo-title">%[RX_PHOTO_TITLE]</div>
 			<div id="id-rx-photo-desc">%[RX_PHOTO_DESC]</div>
@@ -101,8 +105,6 @@ This file is part of OpenWebRX.
 
 			<div id="id-mid-info-container">
 				<div id="id-ident"></div>
-				<div id="id-info-1"></div>
-				<div id="id-info-2"></div>
 			</div>
 
 			<div id="id-topbar-right-container"></div>
@@ -149,35 +151,22 @@ This file is part of OpenWebRX.
 				<div id="id-news-vis" class="class-vis"></div>
 			</div>
 	
-			<div id="id-control" class="class-panel" data-panel-name="control" data-panel-pos="right" data-panel-order="0" data-panel-size="360,275">
-				<div id="id-control-inner" class="class-panel-inner">
-					<div id="id-control-1" class="class-table"></div>
-					<div id="id-control-2" class="class-table"></div>
-					<div id="id-control-3" class="class-table"></div>
-					<div id="id-control-4" class="class-table"></div>
-					<div id="id-control-sliders"></div>
-					<div id="id-control-more"></div>
-					<div id="id-control-smeter"></div>
-				</div>
+			<div id="id-control" class="class-panel" data-panel-name="control" data-panel-pos="right" data-panel-order="0" data-panel-size="365,0">
+				<div id="id-control-inner" class="class-panel-inner"></div>
 				<div id="id-control-vis" class="class-vis"></div>
 			</div>
 	
-			<div id="id-readme" class="class-panel" data-panel-name="readme" data-panel-pos="left" data-panel-order="1" data-panel-size="605,295">
+			<div id="id-readme" class="class-panel" data-panel-name="readme" data-panel-pos="left" data-panel-order="0" data-panel-size="605,295">
 				<div id="id-readme-inner" class="class-panel-inner"></div>
 				<div id="id-readme-vis" class="class-vis"></div>
 			</div>
 	
+	        <!--
 			<div id="id-msgs" class="class-panel" data-panel-name="msgs" data-panel-pos="left" data-panel-order="0" data-panel-size="605,175">
 				<div id="id-msgs-inner" class="class-panel-inner"></div>
 				<div id="id-msgs-vis" class="class-vis"></div>
 			</div>
-		</div>
-		
-		<div id="id-iOS-container" onclick="iOS_play_button()">
-			<div id="id-iOS-play-button">
-				<img src="gfx/openwebrx-play-button.png" />
-				<br /><br />Start OpenWebRX
-			</div>
+			-->
 		</div>
 	</div>
 </div>

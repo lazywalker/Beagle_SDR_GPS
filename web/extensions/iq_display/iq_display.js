@@ -34,6 +34,7 @@ function iq_display_clear()
 var iq_display_imageData;
 var iq_display_draw;
 var iq_display_cmaI, iq_display_cmaQ;
+var iq_display_upd_cnt = 0;
 
 function iq_display_update()
 {
@@ -55,8 +56,16 @@ function iq_display_update()
 		}
 	}
 	
-	w3_el_id('iq_display-cma').innerHTML =
-		'CMA I: '+ iq_display_cmaI.toExponential(3) +'&nbsp; &nbsp; CMA Q: '+ iq_display_cmaQ.toExponential(3);
+	if (iq_display_upd_cnt == 3) {
+      w3_el('iq_display-cma').innerHTML =
+         'CMA I: '+ iq_display_cmaI.toExponential(2) +'&nbsp; &nbsp; CMA Q: '+ iq_display_cmaQ.toExponential(2);
+      w3_el('iq_display-adc').innerHTML =
+         'ADC clock: '+ (ext_adc_clock_Hz()/1e6).toFixed(6) +' MHz';
+      w3_el('iq_display-gps').innerHTML =
+         'GPS corrections: '+ ext_adc_gps_clock_corr();
+      iq_display_upd_cnt = 0;
+   }
+   iq_display_upd_cnt++;
 }
 
 var iq_display_cmd_e = { IQ_POINTS:0, IQ_DENSITY:1, IQ_S4285_P:2, IQ_S4285_D:3, IQ_CLEAR:4 };
@@ -159,10 +168,15 @@ var iq_display_canvas;
 
 function iq_display_controls_setup()
 {
+   var scope_html =
+      w3_div('id-iq_display-scope|left:150px; width:1024px; height:200px; background-color:mediumBlue; position:relative;', 
+   		'<canvas id="id-iq_display-scope-canvas" width="1024" height="200" style="position:absolute"></canvas>'
+      );
+
    var data_html =
-      '<div id="id-iq_display-data" style="left:0px; width:256px; height:256px; background-color:mediumBlue; overflow:hidden; position:relative; display:none" title="iq_display">' +
-   		'<canvas id="id-iq_display-canvas" width="256" height="256" style="position:absolute">test</canvas>'+
-      '</div>';
+      w3_div('id-iq_display-data|left:0px; width:256px; height:256px; background-color:mediumBlue; overflow:hidden; position:relative;',
+   		'<canvas id="id-iq_display-canvas" width="256" height="256" style="position:absolute"></canvas>'
+      );
 
 	// FIXME
 	var draw_s = dbgUs? { 0:'points', 1:'density', 2:'s4285 pts', 3:'s4285 den' } : { 0:'points', 1:'density' };
@@ -170,48 +184,65 @@ function iq_display_controls_setup()
 	var controls_html =
 		w3_divs('id-iq_display-controls w3-text-white', '',
 			w3_half('', '',
-				w3_divs('', 'w3-tspace-8',
+				w3_divs('', '',
 				   data_html,
-			      w3_div('id-iq_display-cma')
+			      w3_div('id-iq_display-cma w3-margin-T-8'),
+			      w3_div('id-iq_display-adc'),
+			      w3_div('id-iq_display-gps')
 			   ),
 				w3_divs('w3-container', 'w3-tspace-8',
 					w3_div('w3-medium w3-text-aqua', '<b>IQ display</b>'),
 					w3_slider('Gain', 'iq_display.gain', iq_display.gain, 0, 100, 1, 'iq_display_gain_cb'),
-					w3_div('w3-inline',
-					   w3_select('Draw', '', 'iq_display.draw', iq_display.draw, draw_s, 'iq_display_draw_select_cb'),
+					w3_div('w3-show-inline-block',
+					   w3_select('', 'Draw', '', 'iq_display.draw', iq_display.draw, draw_s, 'iq_display_draw_select_cb'),
 						w3_button('|margin-left:16px', 'Clear', 'iq_display_clear_cb')
 					),
-					w3_input('Clock offset', 'iq_display.offset', iq_display.offset, 'iq_display_offset_cb', '', 'w3-width-128'),
 					w3_slider('Points', 'iq_display.points', iq_display.points, 4, 14, 1, 'iq_display_points_cb'),
-					w3_button('w3-bright-yellow|margin-left:16px', 'IQ balance (admin)', 'iq_display_IQ_balance_cb')
+               w3_div('w3-show-inline-block',
+					   //w3_input('Clock offset', 'iq_display.offset', iq_display.offset, 'iq_display_offset_cb', '', 'w3-width-128'),
+						w3_button('', 'AM 40Hz', 'iq_display_AM_40Hz_cb')
+					),
+					'<hr '+ w3_psa('|margin:16px 0') +'>',
+               w3_div('w3-show-inline-block',
+					   w3_button('w3-css-yellow', 'IQ bal', 'iq_display_IQ_balance_cb'),
+					   w3_button('w3-css-yellow|margin-left:12px; padding:6px 10px;', 'Fcal '+ w3_icon('', 'fa-repeat'), 'iq_display_IQ_cal_jog_cb', 1),
+					   w3_button('w3-css-yellow|margin-left:12px; padding:6px 10px;', 'Fcal '+ w3_icon('', 'fa-undo'), 'iq_display_IQ_cal_jog_cb', -1)
+					)
 				)
 			)
 		);
 
 	ext_panel_show(controls_html, null, null);
+	ext_set_controls_width_height(null, 330);
 
-	iq_display_canvas = w3_el_id('id-iq_display-canvas');
+	iq_display_canvas = w3_el('id-iq_display-canvas');
 	iq_display_canvas.ctx = iq_display_canvas.getContext("2d");
 	iq_display_imageData = iq_display_canvas.ctx.createImageData(256, 1);
 
-	iq_display_visible(1);
-
-	iq_display_gain_cb('iq_display.gain', iq_display_gain_init);
-	iq_display_points_cb('iq_display.points', iq_display_points_init);
-	ext_send('SET run=1');
+   var pgain = ext_param();
+   pgain = (pgain != null)? parseInt(pgain) : -1;
+   if (pgain >= 0) {
+      iq_display_gain_init = pgain;
+	   iq_display_gain_cb('iq_display.gain', iq_display_gain_init);
+      w3_set_value('iq_display.gain', iq_display_gain_init);
+   }
+	
 	iq_display_clear();
+	ext_send('SET run=1');
 }
 
-function iq_display_gain_cb(path, val)
+function iq_display_gain_cb(path, val, complete, first)
 {
+   val = +val;
 	w3_num_cb(path, val);
 	w3_set_label('Gain '+ ((val == 0)? '(auto-scale)' : val +' dB'), path);
 	ext_send('SET gain='+ val);
 	iq_display_clear();
 }
 
-function iq_display_points_cb(path, val)
+function iq_display_points_cb(path, val, complete, first)
 {
+   val = +val;
 	var points = 1 << val;
 	w3_num_cb(path, val);
 	w3_set_label('Points '+ points, path);
@@ -236,6 +267,13 @@ function iq_display_offset_cb(path, val)
 	ext_send('SET offset='+ val);
 }
 
+function iq_display_AM_40Hz_cb(path, val)
+{
+   ext_set_mode('am');
+   ext_set_passband(-20, 20);
+	setTimeout(function() { iq_display_clear() }, 500);
+}
+
 function iq_display_clear_cb(path, val)
 {
 	iq_display_clear();
@@ -247,22 +285,22 @@ function iq_display_IQ_balance_cb(path, val)
 	admin_pwd_query(function() {
       //console.log('iq_display_IQ_balance_cb');
       
-      w3_el_id('id-confirmation-container').innerHTML =
+      w3_el('id-confirmation-container').innerHTML =
          w3_col_percent('', 'w3-vcenter',
-            w3_div('w3-inline',
+            w3_div('w3-show-inline-block',
                'CAUTION: Only IQ balance with the<br>' +
                'antenna disconnected. Zoom in and<br>' +
                'tune to a frequency with no signals.<br>' +
                'I = '+ (-iq_display_cmaI).toFixed(6) +'&nbsp; &nbsp; Q = '+ (-iq_display_cmaQ).toFixed(6)
             ) +
-            w3_button('w3-green|margin-left:16px', 'Confirm', 'iq_balance_confirm') +
-            w3_button('w3-red|margin-left:16px', 'Cancel', 'iq_balance_cancel'),
+            w3_button('w3-green|margin-left:16px;', 'Confirm', 'iq_balance_confirm') +
+            w3_button('w3-red|margin-left:16px;', 'Cancel', 'confirmation_panel_cancel'),
             90
          );
       
-      confirmation_hook_close('id-confirmation', cal_adc_cancel);
+      confirmation_hook_close('id-confirmation', confirmation_panel_cancel);
       
-      var el = w3_el_id('id-confirmation');
+      var el = w3_el('id-confirmation');
       el.style.zIndex = 1020;
       confirmation_panel_resize(525, 85);
       toggle_panel('id-confirmation');
@@ -282,9 +320,23 @@ function iq_balance_confirm()
    toggle_panel('id-confirmation');
 }
 
-function iq_balance_cancel()
+function iq_display_IQ_cal_jog_cb(path, val)
 {
-   toggle_panel('id-confirmation');
+	admin_pwd_query(function() {
+	   var jog = +val;
+      var new_adj = cfg.clk_adj + jog;
+      //console.log('jog ADC clock: prev='+ cfg.clk_adj +' jog='+ jog +' new='+ new_adj);
+      var adc_clock_ppm_limit = 100;
+      var hz_limit = ext_adc_clock_nom_Hz() * adc_clock_ppm_limit / 1e6;
+
+      if (new_adj < -hz_limit || new_adj > hz_limit) {
+         console.log('jog ADC clock: ADJ TOO LARGE');
+      } else {
+         ext_send('SET clk_adj='+ new_adj);
+         ext_set_cfg_param('cfg.clk_adj', new_adj, true);
+      }
+	});
+	setTimeout(function() {w3_radio_unhighlight(path);}, w3_highlight_time);
 }
 
 function iq_display_blur()
@@ -292,7 +344,6 @@ function iq_display_blur()
 	//console.log('### iq_display_blur');
 	ext_send('SET run=0');
 	kiwi_clearInterval(iq_display_update_interval);
-	iq_display_visible(0);		// hook to be called when controls panel is closed
 }
 
 // called to display HTML for configuration parameters in admin interface
@@ -313,9 +364,4 @@ function iq_display_config_html()
 			*/
 		)
 	);
-}
-
-function iq_display_visible(v)
-{
-	visible_block('id-iq_display-data', v);
 }

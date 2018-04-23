@@ -21,6 +21,7 @@ Boston, MA  02110-1301, USA.
 #include "config.h"
 #include "kiwi.h"
 #include "str.h"
+#include "sha256.h"
 
 #include <stdio.h>
 #include <unistd.h>
@@ -342,22 +343,52 @@ bool kiwi_str_begins_with(char *s, const char *cs)
     return (strncmp(s, cs, slen) == 0);
 }
 
+char *kiwi_skip_over(char *s, const char *skip)
+{
+    int slen = strlen(skip);
+    bool match = (strncmp(s, skip, slen) == 0);
+    return match? (s + slen) : s;
+}
+
 
 // versions of strncpy/strncat that guarantee string terminated when max size reached
 // assumes n has included SPACE_FOR_NULL
 // assume that truncated s2 does no harm (e.g. is not interpreted as an unintended cmd or something)
 
-char *kiwi_strncpy(char *s1, const char *s2, size_t n)
+char *kiwi_strncpy(char *dst, const char *src, size_t n)
 {
-    char *rv = strncpy(s1, s2, n);
-    rv[n-1] = '\0';     // truncate s2 if necessary
+    char *rv = strncpy(dst, src, n);
+    rv[n-1] = '\0';     // truncate src if necessary
     return rv;
 }
 
-char *kiwi_strncat(char *s1, const char *s2, size_t n)
+char *kiwi_strncat(char *dst, const char *src, size_t n)
 {
-    n -= strlen(s1) - SPACE_FOR_NULL;
-    char *rv = strncat(s1, s2, n);
+    n -= strlen(dst) - SPACE_FOR_NULL;
+    char *rv = strncat(dst, src, n);
     // remember that strncat() "adds not more than n chars, then a terminating \0"
     return rv;
 }
+
+// SECURITY: zeros stack vars
+bool kiwi_sha256_strcmp(char *str, const char *key)
+{
+    SHA256_CTX ctx;
+    sha256_init(&ctx);
+
+    int str_len = strlen(str);
+    sha256_update(&ctx, (BYTE *) str, str_len);
+    BYTE str_bin[SHA256_BLOCK_SIZE];
+    sha256_final(&ctx, str_bin);
+    bzero(&ctx, sizeof(ctx));
+
+    char str_s[SHA256_BLOCK_SIZE*2 + SPACE_FOR_NULL];
+    mg_bin2str(str_s, str_bin, SHA256_BLOCK_SIZE);
+    bzero(str_bin, sizeof(str_bin));
+    
+    int r = strcmp(str_s, key);
+    //printf("kiwi_sha256_strcmp: %s %s %s r=%d\n", str, str_s, key, r);
+    bzero(str_s, sizeof(str_s));
+    return r;
+}
+

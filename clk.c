@@ -24,7 +24,6 @@ Boston, MA  02110-1301, USA.
 #include "gps.h"
 #include "timing.h"
 #include "web.h"
-#include "ext_int.h"
 
 //#define CLK_PRINTF
 #ifdef CLK_PRINTF
@@ -108,7 +107,7 @@ void clock_correction(double t_rx, u64_t ticks)
     bool first_time_temp_correction = (clk.adc_clk_corrections == 0);
     
     double offset_window =
-        (first_time_temp_correction || outside_window > MAX_OUTSIDE)? PPM_TO_HZ(ADC_CLOCK_TYP, 50) : PPM_TO_HZ(ADC_CLOCK_TYP, 1);
+        (first_time_temp_correction || outside_window > MAX_OUTSIDE)? PPM_TO_HZ(ADC_CLOCK_TYP, ADC_CLOCK_PPM_TYP) : PPM_TO_HZ(ADC_CLOCK_TYP, 1);
     double offset = new_adc_clock - clk.adc_clock_base;      // offset from previous clock value
 
     // limit offset to a window to help remove outliers
@@ -135,6 +134,7 @@ void clock_correction(double t_rx, u64_t ticks)
     if (adc_clock_mma == 0) adc_clock_mma = new_adc_clock;
     adc_clock_mma = ((adc_clock_mma * (MMA_PERIODS-1)) + new_adc_clock) / MMA_PERIODS;
     clk.adc_clk_corrections++;
+    clk.adc_gps_clk_corrections++;
     
     double diff_mma = adc_clock_mma - clk.adc_clock_base, diff_new = new_adc_clock - prev_new;
     clk_printf("CLK %3d win %4.0lf MMA %.6lf(%5.1f) %5.1f NEW %.6lf(%5.1f) ratio %.6f\n",
@@ -160,45 +160,55 @@ void clock_correction(double t_rx, u64_t ticks)
 
     #define GPS_SETS_TOD
     #ifdef GPS_SETS_TOD
-    // corrects the time, but not the date
-    if (gps.tLS_valid) {
-        static int msg;
-        double gps_utc_fsecs = gps.StatSec - gps.delta_tLS;
-        double gps_utc_frac_sec = gps_utc_fsecs - floor(gps_utc_fsecs);
-        double gps_utc_fhours = gps_utc_fsecs/60/60;
-        UMS hms(gps_utc_fhours);
-        // GPS time HH:MM:SS.sss = hms.u, hms.m, hms.s
-
-        time_t t; time(&t); struct tm tm; gmtime_r(&t, &tm);
-        struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
-        double tm_fsec = (double) ts.tv_nsec/1e9 + (double) tm.tm_sec;
-        double host_utc_fsecs = (double) tm.tm_hour*60*60 + (double) tm.tm_min*60 + tm_fsec;
-        // Host time HH:MM:SS.sss = tm.tm_hour, tm.tm_min, tm_fsec
-
-        double delta = gps_utc_fsecs - host_utc_fsecs;
+        // corrects the time, but not the date
+    
+        #if 0
+            if (!gps.tLS_valid) {
+                gps.delta_tLS = 18;
+                printf("GPS/UTC +%d sec (faked)\n", gps.delta_tLS);
+                gps.tLS_valid = true;
+            }
+        #endif
         
-        #define MAX_CLOCK_ERROR_SECS 2.0
-        // require same day to avoid boundary problem at day wrap (23:59:59 -> 00:00:00)
-        if (gps.StatDay == tm.tm_wday && fabs(delta) > MAX_CLOCK_ERROR_SECS) {
-            tm.tm_hour = hms.u;
-            tm.tm_min = hms.m;
-            tm.tm_sec = (int) floor(hms.s);
-            ts.tv_sec = timegm(&tm);
-            ts.tv_nsec = (time_t) gps_utc_frac_sec * 1e9;
-            msg = 4;
-
-            if (clock_settime(CLOCK_REALTIME, &ts) < 0) {
-                perror("clock_settime");
+        if (gps.tLS_valid) {
+            static int msg;
+            double gps_utc_fsecs = gps.StatSec - gps.delta_tLS;
+            double gps_utc_frac_sec = gps_utc_fsecs - floor(gps_utc_fsecs);
+            double gps_utc_fhours = gps_utc_fsecs/60/60;
+            UMS hms(gps_utc_fhours);
+            // GPS time HH:MM:SS.sss = hms.u, hms.m, hms.s
+    
+            time_t t; time(&t); struct tm tm; gmtime_r(&t, &tm);
+            struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+            double tm_fsec = (double) ts.tv_nsec/1e9 + (double) tm.tm_sec;
+            double host_utc_fsecs = (double) tm.tm_hour*60*60 + (double) tm.tm_min*60 + tm_fsec;
+            // Host time HH:MM:SS.sss = tm.tm_hour, tm.tm_min, tm_fsec
+    
+            double delta = gps_utc_fsecs - host_utc_fsecs;
+            
+            #define MAX_CLOCK_ERROR_SECS 2.0
+            // require same day to avoid boundary problem at day wrap (23:59:59 -> 00:00:00)
+            if (gps.StatDay == tm.tm_wday && fabs(delta) > MAX_CLOCK_ERROR_SECS) {
+                tm.tm_hour = hms.u;
+                tm.tm_min = hms.m;
+                tm.tm_sec = (int) floor(hms.s);
+                ts.tv_sec = timegm(&tm);
+    
+                // NB: doesn't work without the intermediate cast to (int)
+                ts.tv_nsec = (time_t) (int) (gps_utc_frac_sec * 1e9);
+                msg = 4;
+    
+                if (clock_settime(CLOCK_REALTIME, &ts) < 0) {
+                    perror("clock_settime");
+                }
+            }
+            
+            if (msg) {
+                printf("GPS %02d:%02d:%04.3f (%+d) UTC %02d:%02d:%04.3f deltaT %.3f %s\n",
+                    hms.u, hms.m, hms.s, gps.delta_tLS, tm.tm_hour, tm.tm_min, tm_fsec, delta, (msg == 4)? "SET" : "CHECK");
+                msg--;
             }
         }
-        
-        if (msg) {
-            printf("GPS %02d:%02d:%04.1f (%+d) UTC %02d:%02d:%04.1f deltaT %.3f %s SET\n",
-                hms.u, hms.m, hms.s, gps.delta_tLS, tm.tm_hour, tm.tm_min, tm_fsec, delta,
-                (msg == 4)? "FIRST":"SUBSEQUENT");
-            msg--;
-        }
-    }
     #endif
 
     #if 0

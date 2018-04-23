@@ -188,6 +188,24 @@ void ctrl_clr_set(u2_t clr, u2_t set)
 	//printf("ctrl_clr_set(0x%04x, 0x%04x) ctrl_get=0x%04x\n", clr, set, ctrl_get());
 }
 
+void ctrl_positive_pulse(u2_t bits)
+{
+	spi_set_noduplex(CmdCtrlClr, bits);
+	spi_set_noduplex(CmdCtrlSet, bits);
+	spi_set_noduplex(CmdCtrlClr, bits);
+}
+
+stat_reg_t stat_get()
+{
+    static SPI_MISO status;
+    stat_reg_t stat;
+    
+    spi_get_noduplex(CmdGetStatus, &status, sizeof(stat));
+    stat.word = status.word[0];
+
+    return stat;
+}
+
 u2_t getmem(u2_t addr)
 {
 	static SPI_MISO mem;
@@ -207,6 +225,7 @@ void printmem(const char *str, u2_t addr)
 void send_msg_buf(conn_t *c, char *s, int slen)
 {
     if (c->internal_connection) {
+        //clprintf(c, "send_msg_buf: internal_connection <%s>\n", s);
     } else {
         if (c->mc == NULL) {
             /*
@@ -278,9 +297,43 @@ void send_msg_encoded(conn_t *conn, const char *dst, const char *cmd, const char
 	
 	char *buf = kiwi_str_encode(s);
 	free(s);
-    assert(!conn->internal_connection);
-	send_msg_mc(conn->mc, FALSE, "%s %s=%s", dst, cmd, buf);
+	send_msg(conn, FALSE, "%s %s=%s", dst, cmd, buf);
 	free(buf);
+}
+
+// sent direct to mg_connection -- only directly called in a few places where conn_t isn't available
+// caution: never use an mprint() here as this will result in a loop
+void send_msg_mc_encoded(struct mg_connection *mc, const char *dst, const char *cmd, const char *fmt, ...)
+{
+	va_list ap;
+	char *s;
+
+	if (cmd == NULL || fmt == NULL) return;
+	
+	va_start(ap, fmt);
+	vasprintf(&s, fmt, ap);
+	va_end(ap);
+	
+	char *buf = kiwi_str_encode(s);
+	free(s);
+	send_msg_mc(mc, FALSE, "%s %s=%s", dst, cmd, buf);
+	free(buf);
+}
+
+void input_msg_internal(conn_t *conn, const char *fmt, ...)
+{
+	va_list ap;
+	char *s;
+
+	if (fmt == NULL) return;
+	
+	va_start(ap, fmt);
+	vasprintf(&s, fmt, ap);
+	va_end(ap);
+	
+    assert(conn->internal_connection);
+	nbuf_allocq(&conn->c2s, s, strlen(s));
+	free(s);
 }
 
 float ecpu_use()
@@ -501,4 +554,90 @@ void pgm_file_height(FILE *fp, int offset, int height)
         lprintf("pgm_file_height: height limited to 999999!\n");
     }
     fprintf(fp, "%6d", height);
+}
+
+static const char *field = "ABCDEFGHIJKLMNOPQR";
+static const char *square = "0123456789";
+static const char *subsquare = "abcdefghijklmnopqrstuvwx";
+
+void grid_to_latLon(char *grid, latLon_t *loc)
+{
+	double lat, lon;
+	char c;
+	int slen = strlen(grid);
+	
+	loc->lat = loc->lon = 999.0;
+	if (slen < 4) return;
+	
+	c = tolower(grid[0]);
+	if (c < 'a' || c > 'r') return;
+	lon = (c-'a')*20 - 180;
+
+	c = tolower(grid[1]);
+	if (c < 'a' || c > 'r') return;
+	lat = (c-'a')*10 - 90;
+
+	c = grid[2];
+	if (c < '0' || c > '9') return;
+	lon += (c-'0') * SQ_LON_DEG;
+
+	c = grid[3];
+	if (c < '0' || c > '9') return;
+	lat += (c-'0') * SQ_LAT_DEG;
+
+	if (slen != 6) {	// assume center of square (i.e. "....ll")
+		lon += SQ_LON_DEG /2.0;
+		lat += SQ_LAT_DEG /2.0;
+	} else {
+		c = tolower(grid[4]);
+		if (c < 'a' || c > 'x') return;
+		lon += (c-'a') * SUBSQ_LON_DEG;
+
+		c = tolower(grid[5]);
+		if (c < 'a' || c > 'x') return;
+		lat += (c-'a') * SUBSQ_LAT_DEG;
+
+		lon += SUBSQ_LON_DEG /2.0;	// assume center of sub-square (i.e. "......44")
+		lat += SUBSQ_LAT_DEG /2.0;
+	}
+
+	loc->lat = lat;
+	loc->lon = lon;
+	//wprintf("GRID %s%s = (%f, %f)\n", grid, (slen != 6)? "[ll]":"", lat, lon);
+}
+
+int latLon_to_grid6(latLon_t *loc, char *grid6)
+{
+	int i;
+	double r, lat, lon;
+	
+	// longitude
+	lon = loc->lon + 180.0;
+	if (lon < 0 || lon >= 360.0) return -1;
+	i = (int) lon / FLD_DEG_LON;
+	grid6[0] = field[i];
+	r = lon - (i * FLD_DEG_LON);
+	
+	i = (int) floor(r / SQ_LON_DEG);
+	grid6[2] = square[i];
+	r = r - (i * SQ_LON_DEG);
+	
+	i = (int) floor(r * (SUBSQ_PER_SQ / SQ_LON_DEG));
+	grid6[4] = subsquare[i];
+	
+	// latitude
+	lat = loc->lat + 90.0;
+	if (lat < 0 || lat >= 180.0) return -1;
+	i = (int) lat / FLD_DEG_LAT;
+	grid6[1] = field[i];
+	r = lat - (i * FLD_DEG_LAT);
+	
+	i = (int) floor(r / SQ_LAT_DEG);
+	grid6[3] = square[i];
+	r = r - (i * SQ_LAT_DEG);
+	
+	i = (int) floor(r * (SUBSQ_PER_SQ / SQ_LAT_DEG));
+	grid6[5] = subsquare[i];
+	
+	return 0;
 }

@@ -21,7 +21,7 @@
 `default_nettype none
 
 // 64K bit buffer and serial-write to 16-bit parallel-read converter
-// uses 4 RAMB16s
+// uses 4 BRAM16s
 
 module SAMPLER (
     input  wire clk,

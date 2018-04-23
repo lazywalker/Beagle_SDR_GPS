@@ -19,13 +19,15 @@ Boston, MA  02110-1301, USA.
 
 #pragma once
 
+struct conn_t;
+
 #include "types.h"
 #include "kiwi.gen.h"
 #include "datatypes.h"
-#include "fastfir.h"
-#include "web.h"
 #include "coroutines.h"
 #include "misc.h"
+#include "cfg.h"
+#include "non_block.h"
 
 #define	I	0
 #define	Q	1
@@ -39,64 +41,54 @@ Boston, MA  02110-1301, USA.
 #define CUTESDR_MAX_VAL ((float) ((1 << CUTESDR_SCALE) - 1))
 #define CUTESDR_MAX_PWR (CUTESDR_MAX_VAL * CUTESDR_MAX_VAL)
 
-// Use odd values so periodic signals like radars running at even-Hz rates don't
-// beat against update rate and produce artifacts or blanking.
-#define	WF_SPEED_MAX		23
-#define	WF_SPEED_SLOW		1
-#define	WF_SPEED_MED		17
-#define	WF_SPEED_FAST		WF_SPEED_MAX
-
-#define	WEB_SERVER_POLL_US	(1000000 / WF_SPEED_MAX / 2)
-
 extern int version_maj, version_min;
-extern rx_chan_t rx_channels[];
-extern conn_t conns[];
-extern bool background_mode, adc_clock_enable, need_hardware, no_net, test_flag, gps_always_acq,
-	DUC_enable_start, web_nocache, web_caching_debug, auth_su;
+
+extern bool background_mode, adc_clock_enable, need_hardware, no_net, test_flag,
+	DUC_enable_start, rev_enable_start, web_nocache, web_caching_debug, auth_su, sdr_hu_debug,
+	have_ant_switch_ext, gps_e1b_only, disable_led_task;
+
 extern int p0, p1, p2, wf_sim, wf_real, wf_time, ev_dump, wf_flip, wf_exit, wf_start, tone, down, navg,
 	rx_cordic, rx_cic, rx_cic2, rx_dump, wf_cordic, wf_cic, wf_mult, wf_mult_gen, meas, do_dyn_dns,
 	rx_yield, gps_chans, spi_clkg, spi_speed, wf_max, rx_num, wf_num, do_slice, do_gps, do_sdr, wf_olap,
 	spi_delay, do_fft, noisePwr, unwrap, rev_iq, ineg, qneg, fft_file, fftsize, fftuse, bg, alt_port,
-	color_map, port, print_stats, ecpu_cmds, ecpu_tcmds, serial_number,
+	color_map, port, print_stats, ecpu_cmds, ecpu_tcmds, serial_number, ip_limit_mins,
 	use_spidev, inactivity_timeout_mins, S_meter_cal, current_nusers, debug_v, debian_ver,
-	utc_offset, dst_offset;
+	utc_offset, dst_offset, reg_kiwisdr_com_status, sdr_hu_lo_kHz, sdr_hu_hi_kHz,
+	debian_maj, debian_min, gps_debug, gps_var, gps_lo_gain, gps_cg_gain;
+
+extern char **main_argv;
+
 extern float g_genfreq, g_genampl, g_mixfreq;
-extern double ui_srate;
+extern double ui_srate, freq_offset;
 extern TYPEREAL DC_offset_I, DC_offset_Q;
 extern char *cpu_stats_buf, *tzone_id, *tzone_name;
+extern char auth_su_remote_ip[NET_ADDRSTRLEN];
+extern cfg_t cfg_ipl;
 
 extern lock_t spi_lock;
 extern volatile float audio_kbps, waterfall_kbps, waterfall_fps[RX_CHANS+1], http_kbps;
 extern volatile int audio_bytes, waterfall_bytes, waterfall_frames[], http_bytes;
 
-// sound
-struct snd_t {
-	u4_t seq;
-    #ifdef SND_SEQ_CHECK
-        bool snd_seq_init;
-	    u4_t snd_seq;
-    #endif
+struct rx_chan_t {
+	bool enabled;
+	bool busy;
+	conn_t *conn_snd;       // the STREAM_SOUND conn
 };
 
-extern snd_t snd_inst[RX_CHANS];
-
-struct snd_pkt_t {
-	struct {
-		char id[4];
-		u4_t seq;           // waterfall syncs to this sequence number on the client-side
-		char smeter[2];
-	} __attribute__((packed)) h;
-	union {
-        u1_t buf_iq[FASTFIR_OUTBUF_SIZE * 2 * sizeof(u2_t)];
-        u1_t buf_real[FASTFIR_OUTBUF_SIZE * sizeof(u2_t)];
-    };
-} __attribute__((packed));
+extern rx_chan_t rx_channels[];
 
 #define N_MODE 8
 extern const char *mode_s[N_MODE], *modu_s[N_MODE];	// = { "am", "amn", "usb", "lsb", "cw", "cwn", "nbfm", "iq" };
 enum mode_e { MODE_AM, MODE_AMN, MODE_USB, MODE_LSB, MODE_CW, MODE_CWN, MODE_NBFM, MODE_IQ };
 
+enum sdr_hu_dom_sel_e { DOM_SEL_NAM=0, DOM_SEL_DUC=1, DOM_SEL_PUB=2, DOM_SEL_SIP=3, DOM_SEL_REV=4 };
+
 #define	KEEPALIVE_SEC		60
+
+// print_stats
+#define STATS_GPS       0x01
+#define STATS_GPS_SOLN  0x02
+#define STATS_TASK      0x04
 
 void fpga_init();
 
@@ -111,8 +103,8 @@ void cfg_adm_transition();
 bool rx_common_cmd(const char *stream_name, conn_t *conn, char *cmd);
 void dump();
 
-enum websocket_mode_e { WS_MODE_ALLOC, WS_MODE_LOOKUP, WS_MODE_CLOSE };
-conn_t *rx_server_websocket(struct mg_connection *mc, websocket_mode_e);
+enum websocket_mode_e { WS_MODE_ALLOC, WS_MODE_LOOKUP, WS_MODE_CLOSE, WS_INTERNAL_CONN };
+conn_t *rx_server_websocket(websocket_mode_e mode, struct mg_connection *mc);
 
 void c2s_sound_init();
 void c2s_sound_setup(void *param);
@@ -133,12 +125,13 @@ void c2s_mfg(void *param);
 extern bool update_pending, update_in_progress, backup_in_progress;
 extern int pending_maj, pending_min;
 
-void check_for_update(update_check_e type, conn_t *conn);
-void schedule_update(int hour, int min);
-
 extern bool sd_copy_in_progress;
 
 enum logtype_e { LOG_ARRIVED, LOG_UPDATE, LOG_UPDATE_NC, LOG_LEAVING };
 void loguser(conn_t *c, logtype_e type);
 void webserver_collect_print_stats(int print);
 void stat_task(void *param);
+
+enum rx_chan_action_e { RX_CHAN_ENABLE, RX_CHAN_DISABLE, RX_CHAN_FREE };
+void rx_enable(int chan, rx_chan_action_e action);
+int rx_chan_free(int *idx);

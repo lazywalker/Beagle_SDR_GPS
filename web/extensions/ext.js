@@ -29,21 +29,22 @@ function ext_panel_show(controls_html, data_html, show_func)
 
 function ext_set_data_height(height)
 {
-   var el = w3_el_id('id-ext-data-container');
+   var el = w3_el('id-ext-data-container');
    if (!height) {
-      el.style.height = '';      // revert to default
+      if (el) el.style.height = '';      // revert to default
    } else {
-      el.style.height = px(height);
+      if (el) el.style.height = px(height);
    }
 }
 
+// default size: w=525, h=300
 function ext_set_controls_width_height(width, height)
 {
 	panel_set_width_height('ext-controls', width, height);
 }
 
 var EXT_SAVE = true;
-var EXT_NO_SAVE = false;
+var EXT_NO_SAVE = false;   // set the local JSON cfg, but don't set on server which would require admin privileges.
 
 function ext_get_cfg_param(path, init_val, save)
 {
@@ -73,9 +74,9 @@ function ext_get_cfg_param(path, init_val, save)
 	return cur_val;
 }
 
-function ext_get_cfg_param_string(path, init_val)
+function ext_get_cfg_param_string(path, init_val, save)
 {
-	return decodeURIComponent(ext_get_cfg_param(path, init_val));
+	return decodeURIComponent(ext_get_cfg_param(path, init_val, save));
 }
 
 function ext_set_cfg_param(path, val, save)
@@ -90,6 +91,11 @@ function ext_set_cfg_param(path, val, save)
 	}
 }
 
+function ext_get_freq_range()
+{
+   return { lo_kHz: cfg.sdr_hu_lo_kHz, hi_kHz: cfg.sdr_hu_hi_kHz, offset_kHz: cfg.freq_offset };
+}
+
 var ext_zoom = {
 	TO_BAND: 0,
 	IN: 1,
@@ -100,15 +106,20 @@ var ext_zoom = {
 	MAX_OUT: -9
 };
 
+var extint_ext_is_tuning = false;
+
 function ext_tune(fdsp, mode, zoom, zoom_level) {		// specifying mode is optional
 	//console.log('ext_tune: '+ fdsp +', '+ mode +', '+ zoom +', '+ zoom_level);
-	freqmode_set_dsp_kHz(fdsp, mode);
 	
-	if (zoom != undefined) {
-		zoom_step(zoom, zoom_level);
-	} else {
-		zoom_step(ext_zoom.TO_BAND);
-	}
+	extint_ext_is_tuning = true;
+      freqmode_set_dsp_kHz(fdsp, mode);
+      
+      if (zoom != undefined) {
+         zoom_step(zoom, zoom_level);
+      } else {
+         zoom_step(ext_zoom.TO_BAND);
+      }
+	extint_ext_is_tuning = false;
 }
 
 function ext_get_freq()
@@ -170,8 +181,16 @@ function ext_set_passband(low_cut, high_cut, set_mode_pb, fdsp)		// specifying f
 		freq_car_Hz = freq_dsp_to_car(fdsp);
 	}
 
-	demodulator_set_offset_frequency(0, freq_car_Hz - center_freq);
+	extint_ext_is_tuning = true;
+	   demodulator_set_offset_frequency(0, freq_car_Hz - center_freq);
+	extint_ext_is_tuning = false;
 }
+
+function ext_get_zoom()
+{
+	return zoom_level;
+}
+
 
 // This just decides if a password exchange is needed to establish the credential.
 // The actual change of server state by any client code must be validated by
@@ -181,9 +200,15 @@ function ext_hasCredential(conn_type, cb, cb_param, ws)
 {
 	if (conn_type == 'mfg') conn_type = 'admin';
 	
-	var pwd = readCookie(conn_type);
-	pwd = pwd? pwd:'';	// make non-null
-	pwd = decodeURIComponent(pwd);
+	var pwd;
+	if (conn_type == 'admin') {
+	   deleteCookie('admin');
+	   deleteCookie('admin-pwd');
+	   pwd = '';
+	} else {
+      pwd = readCookie(conn_type);
+      pwd = pwd? decodeURIComponent(pwd):'';    // make non-null
+   }
 	//console.log('ext_hasCredential: readCookie '+ conn_type +'="'+ pwd +'"');
 	
 	// always check in case not having a pwd is accepted by local subnet match
@@ -198,12 +223,19 @@ function ext_valpwd(conn_type, pwd, ws)
 	//		with scanf() on the server end, e.g. embedded spaces
 	//		with cookie storage that deletes leading and trailing whitespace
 	pwd = encodeURIComponent(pwd);
-	writeCookie(conn_type, pwd);
+	if (conn_type != 'admin')
+	   writeCookie(conn_type, pwd);
 	//console.log('ext_valpwd: writeCookie '+ conn_type +'="'+ pwd +'"');
 	extint_conn_type = conn_type;
+	
+	// pwd can't be empty if there is an ipl= (use # since it would have been encoded if in real pwd)
+	pwd = (pwd != '')? pwd : '#';
+	
+	var ipl = readCookie('iplimit');
+	ipl = ipl? (' ipl='+ ipl) : '';
 
-	//console.log('SET auth t='+ conn_type +' p='+ pwd);
-	ext_send('SET auth t='+ conn_type +' p='+ pwd, ws);
+	//console.log('SET auth t='+ conn_type +' p='+ pwd + ipl);
+	ext_send('SET auth t='+ conn_type +' p='+ pwd + ipl, ws);
 	// the server reply then calls extint_valpwd_cb() below
 }
 
@@ -223,12 +255,32 @@ function ext_get_authkey(func)
 	extint_authkey_cb = func;
 }
 
+// updated by gps_stats_cb() from kiwi_msg() "stats_cb="
 var extint_adc_clock_Hz = 0;
 
 function ext_adc_clock_Hz()
 {
 	return extint_adc_clock_Hz;
 }
+
+// updated by gps_stats_cb() from kiwi_msg() "stats_cb="
+var extint_adc_gps_clock_corr = 0;
+
+function ext_adc_gps_clock_corr()
+{
+	return extint_adc_gps_clock_corr;
+}
+
+// updated from kiwi_msg() "adc_clk_nom="
+var extint_adc_clock_nom_Hz = 0;
+
+function ext_adc_clock_nom_Hz()
+{
+	return extint_adc_clock_nom_Hz;
+}
+
+// updated from kiwi_msg() "sample_rate="
+var extint_srate = 0;
 
 function ext_sample_rate()
 {
@@ -269,13 +321,14 @@ function ext_panel_func(name)
 
 function extint_init()
 {
-	window.addEventListener("resize", extint_resize);
+
 }
 
-function extint_resize()
+function extint_environment_changed(changed)
 {
-	if (extint_current_ext_name)
-		w3_call(extint_current_ext_name +'_resize');
+	if (extint_current_ext_name) {
+	   w3_call(extint_current_ext_name +'_environment_changed', changed);
+	}
 }
 
 var extint_pwd_cb = null;
@@ -300,7 +353,7 @@ function extint_connect_server()
 {
 	extint_ws = open_websocket('EXT', extint_open_ws_cb, null, extint_msg_cb);
 
-	// when the stream thread is established on the server it will automatically send a "SET init" to us
+	// when the stream thread is established on the server it will automatically send a "MSG ext_client_init" to us
 	return extint_ws;
 }
 
@@ -367,31 +420,35 @@ function extint_select_menu()
 {
 	var s = '';
 	if (extint_names) for (var i=0; i < extint_names.length; i++) {
+		//if (!dbgUs && extint_names[i] == 'devl') continue;
+
 		if (!dbgUs && extint_names[i] == 's4285') continue;	// FIXME: hide while we develop
 		if (!dbgUs && extint_names[i] == 'test') continue;	// FIXME: hide while we develop
 		if (!dbgUs && extint_names[i] == 'timecode') continue;	// FIXME: hide while we develop
+		if (!dbgUs && extint_names[i] == 'colormap') continue;	// FIXME: hide while we develop
+
 		s += '<option value="'+ i +'">'+ extint_names[i] +'</option>';
 	}
 	//console.log('extint_select_menu = '+ s);
 	return s;
 }
 
-function extint_override(name)
+function extint_open(name, delay)
 {
+   name = name.toLowerCase();
 	for (var i=0; i < extint_names.length; i++) {
-		if (extint_names[i].includes(name)) {
-			//console.log('extint_override match='+ extint_names[i]);
-			setTimeout(function() {extint_select(i);}, 3000);
+		if (extint_names[i].toLowerCase().includes(name)) {
+			//console.log('extint_open match='+ extint_names[i]);
+			if (delay) {
+			   //console.log('extint_open '+ name +' delay='+ delay);
+			   setTimeout(function() {extint_select(i);}, delay);
+			} else {
+			   //console.log('extint_open '+ name +' NO DELAY');
+			   extint_select(i);
+			}
 			break;
 		}
 	}
-}
-
-var extint_srate = 0;
-
-function extint_sample_rate(srate)
-{
-	extint_srate = parseFloat(srate);
 }
 
 function extint_audio_data(data, samps)

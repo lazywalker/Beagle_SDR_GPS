@@ -12,7 +12,6 @@ function S_meter_main()
 	S_meter_first_time = false;
 }
 
-var sm_xo = 200;
 var sm_w = 1024;
 var sm_padding = 10;
 var sm_tw = sm_w + sm_padding*2;
@@ -78,11 +77,11 @@ var S_meter_data_canvas;
 function S_meter_controls_setup()
 {
    var data_html =
-      '<div id="id-S_meter-time-display" style="top:50px; background-color:black; position:relative;"></div>' +
+      time_display_html('S_meter') +
 
-      '<div id="id-S_meter-data" style="left:150px; width:1044px; height:200px; background-color:mediumBlue; position:relative; display:none" title="S-meter graph">' +
-   		'<canvas id="id-S_meter-data-canvas" width="1024" height="180" style="position:absolute; padding: 10px 10px 10px 10px;"></canvas>'+
-      '</div>';
+      w3_div('id-S_meter-data|left:150px; width:1044px; height:200px; background-color:mediumBlue; position:relative;',
+   		'<canvas id="id-S_meter-data-canvas" width="1024" height="180" style="position:absolute; padding: 10px 10px 10px 10px;"></canvas>'
+      );
 
 	var range_s = {
 		0:'manual',
@@ -102,35 +101,29 @@ function S_meter_controls_setup()
 		w3_divs('id-S_meter-controls w3-text-white', '',
 			w3_divs('w3-container', 'w3-tspace-8',
 				w3_divs('', 'w3-medium w3-text-aqua', '<b>S-meter graph</b>'),
-				w3_select('Range', '', 'S_meter.range', S_meter.range, range_s, 'S_meter_range_select_cb'),
+				w3_select('', 'Range', '', 'S_meter.range', S_meter.range, range_s, 'S_meter_range_select_cb'),
 				w3_divs('id-S_meter-scale-sliders', '',
 					w3_slider('Scale max', 'S_meter.maxdb', S_meter.maxdb, -160, 0, 10, 'S_meter_maxdb_cb'),
 					w3_slider('Scale min', 'S_meter.mindb', S_meter.mindb, -160, 0, 10, 'S_meter_mindb_cb')
 				),
 				w3_slider('Speed', 'S_meter.speed', S_meter.speed, 1, S_meter_speed_max, 1, 'S_meter_speed_cb'),
 				w3_divs('', 'w3-show-inline w3-hspace-16',
-					w3_select('Marker rate', '', 'S_meter.marker', S_meter.marker, marker_s, 'S_meter_marker_select_cb'),
+					w3_select('', 'Marker rate', '', 'S_meter.marker', S_meter.marker, marker_s, 'S_meter_marker_select_cb'),
 					w3_button('', 'Clear', 'S_meter_clear_cb')
 				)
 			)
 		);
 
 	ext_panel_show(controls_html, data_html, null);
-	time_display_setup('id-S_meter-time-display');
+	time_display_setup('S_meter');
 
-	S_meter_data_canvas = w3_el_id('id-S_meter-data-canvas');
+	S_meter_data_canvas = w3_el('id-S_meter-data-canvas');
 	S_meter_data_canvas.ctx = S_meter_data_canvas.getContext("2d");
 	S_meter_data_canvas.im = S_meter_data_canvas.ctx.createImageData(sm_w, 1);
 
 	S_meter_resize();
 	ext_set_controls_width_height(225);
 
-	S_meter_visible(1);
-
-	S_meter_maxdb_cb('S_meter.maxdb', S_meter.maxdb);
-	S_meter_mindb_cb('S_meter.mindb', S_meter.mindb);
-	S_meter_speed_cb('S_meter.speed', S_meter.speed);
-	
 	ext_send('SET run=1');
 
 	S_meter_update_interval = setInterval(function() {S_meter_update(0);}, 1000);
@@ -139,8 +132,8 @@ function S_meter_controls_setup()
 
 function S_meter_resize()
 {
-	var el = w3_el_id('S_meter-data');
-	var left = ((window.innerWidth - sm_tw) / 2) - 50;
+	var el = w3_el('id-S_meter-data');
+	var left = (window.innerWidth - sm_tw - time_display_width()) / 2;
 	el.style.left = px(left);
 }
 
@@ -387,7 +380,6 @@ function S_meter_blur()
 {
 	//console.log('### S_meter_blur');
 	ext_send('SET run=0');
-	S_meter_visible(0);		
 	kiwi_clearInterval(S_meter_update_interval);
 }
 
@@ -409,9 +401,4 @@ function S_meter_config_html()
 			*/
 		)
 	);
-}
-
-function S_meter_visible(v)
-{
-	visible_block('id-S_meter-data', v);
 }

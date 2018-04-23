@@ -27,9 +27,11 @@ Boston, MA  02110-1301, USA.
 #include "spi.h"
 #include "coroutines.h"
 #include "jsmn.h"
-
 #include "cfg.h"
-#include "dx.h"
+
+#if RX_CHANS
+ #include "dx.h"
+#endif
 
 #include <sys/types.h>
 #include <string.h>
@@ -128,8 +130,10 @@ void cfg_reload(bool called_from_main)
 			}
 		}
 	}
-	
+
+#if RX_CHANS
 	dx_reload();
+#endif
 	
 	if (!called_from_main) {
 		services_start(SVCS_RESTART_TRUE);
@@ -176,6 +180,7 @@ bool _cfg_init(cfg_t *cfg, char *buf)
 	}
 	
 	if (!cfg->init) {
+	    cfg->init_load = true;
 		if (_cfg_load_json(cfg) == false) {
 			if (cfg == &cfg_dx) {
 				lprintf("DX configuration file %s: JSON parse failed\n", cfg->filename);
@@ -184,6 +189,7 @@ bool _cfg_init(cfg_t *cfg, char *buf)
 			panic("cfg_init json");
 		}
 		cfg->init = true;
+	    cfg->init_load = false;
 	}
 	
 	lprintf("reading configuration from file %s: %d tokens\n", cfg->filename, cfg->ntok);
@@ -250,9 +256,10 @@ jsmntok_t *_cfg_lookup_json(cfg_t *cfg, const char *id, cfg_lookup_e option)
 	jsmntok_t *jt = cfg->tokens;
 	//printf("_cfg_lookup_json: key=\"%s\" %d\n", id, idlen);
 	char *dot = (char *) strchr(id, '.');
+	char *dotdot = dot? (char *) strchr(dot+1, '.') : NULL;
 
-	// handle two levels of id scope, i.e. id1.id2
-	if (dot) {
+	// handle two levels of id scope, i.e. id1.id2, but ignore more like ip addresses with three dots
+	if (dot && !dotdot && option != CFG_OPT_NO_DOT) {
 		char *id1_m = NULL, *id2_m = NULL;
 		i = sscanf(id, "%m[^.].%ms", &id1_m, &id2_m);
 		//printf("_cfg_lookup_json 2-scope: key=\"%s\" n=%d id1=\"%s\" id2=\"%s\"\n", id, i, id1_m, id2_m);
@@ -398,7 +405,7 @@ bool _cfg_int_json(cfg_t *cfg, jsmntok_t *jt, int *num)
 {
 	assert(jt != NULL);
 	char *s = &cfg->json[jt->start];
-	if (jt->type == JSMN_PRIMITIVE && (*s == '-' || isdigit(*s))) {
+	if (JSMN_IS_PRIMITIVE(jt) && (*s == '-' || isdigit(*s))) {
 		*num = strtol(s, 0, 0);
 		return true;
 	} else {
@@ -411,7 +418,8 @@ int _cfg_int(cfg_t *cfg, const char *name, bool *error, u4_t flags)
 	int num = 0;
 	bool err = false;
 
-	jsmntok_t *jt = _cfg_lookup_json(cfg, name, CFG_OPT_NONE);
+	//jsmntok_t *jt = _cfg_lookup_json(cfg, name, CFG_OPT_NONE);
+	jsmntok_t *jt = _cfg_lookup_json(cfg, name, (flags & CFG_NO_DOT)? CFG_OPT_NO_DOT : CFG_OPT_NONE);
 	if (!jt || jt == CFG_LOOKUP_LVL1 || _cfg_int_json(cfg, jt, &num) == false) {
 		err = true;
 	}
@@ -431,7 +439,8 @@ int _cfg_set_int(cfg_t *cfg, const char *name, int val, u4_t flags, int pos)
 	int slen;
 	char *s;
 	char *id2 = strchr((char *) name, '.') + 1;
-	jsmntok_t *jt = _cfg_lookup_json(cfg, name, CFG_OPT_NONE);
+	//jsmntok_t *jt = _cfg_lookup_json(cfg, name, CFG_OPT_NONE);
+	jsmntok_t *jt = _cfg_lookup_json(cfg, name, (flags & CFG_NO_DOT)? CFG_OPT_NO_DOT : CFG_OPT_NONE);
 
 	if (flags & CFG_REMOVE) {
 		if (!jt || jt == CFG_LOOKUP_LVL1) {
@@ -440,7 +449,7 @@ int _cfg_set_int(cfg_t *cfg, const char *name, int val, u4_t flags, int pos)
 		}
 		
 		s = &cfg->json[jt->start];
-		assert(jt->type == JSMN_PRIMITIVE && (isdigit(*s) || *s == '-'));
+		assert(JSMN_IS_PRIMITIVE(jt) && (isdigit(*s) || *s == '-'));
 		
 		// ,"id":int or {"id":int
 		//   ^start
@@ -488,9 +497,9 @@ int _cfg_default_int(cfg_t *cfg, const char *name, int val, bool *error_p)
 	if (error) {
 		_cfg_set_int(cfg, name, val, CFG_SET, 0);
 		existing = val;
-		printf("_cfg_default_int: %s = %d\n", name, val);
+		//printf("_cfg_default_int: %s = %d\n", name, val);
 	}
-	*error_p = *error_p | error;
+	if (error_p) *error_p = *error_p | error;
 	return existing;
 }
 
@@ -498,7 +507,7 @@ bool _cfg_float_json(cfg_t *cfg, jsmntok_t *jt, double *num)
 {
 	assert(jt != NULL);
 	char *s = &cfg->json[jt->start];
-	if (jt->type == JSMN_PRIMITIVE && (*s == '-' || isdigit(*s))) {
+	if (JSMN_IS_PRIMITIVE(jt) && (*s == '-' || isdigit(*s) || *s == '.')) {
 		*num = strtod(s, NULL);
 		return true;
 	} else {
@@ -540,7 +549,7 @@ int _cfg_set_float(cfg_t *cfg, const char *name, double val, u4_t flags, int pos
 		}
 		
 		s = &cfg->json[jt->start];
-		assert(jt->type == JSMN_PRIMITIVE && (isdigit(*s) || *s == '-' || *s == '.'));
+		assert(JSMN_IS_PRIMITIVE(jt) && (isdigit(*s) || *s == '-' || *s == '.'));
 		
 		// ,"id":float or {"id":float
 		//   ^start
@@ -588,10 +597,22 @@ double _cfg_default_float(cfg_t *cfg, const char *name, double val, bool *error_
 	if (error) {
 		_cfg_set_float(cfg, name, val, CFG_SET, 0);
 		existing = val;
-		printf("_cfg_default_float: %s = %g\n", name, val);
+		//printf("_cfg_default_float: %s = %g\n", name, val);
 	}
-	*error_p = *error_p | error;
+	if (error_p) *error_p = *error_p | error;
 	return existing;
+}
+
+bool _cfg_bool_json(cfg_t *cfg, jsmntok_t *jt, int *num)
+{
+	assert(jt != NULL);
+	char *s = &cfg->json[jt->start];
+	if (JSMN_IS_PRIMITIVE(jt) && (*s == 't' || *s == 'f')) {
+		*num = (*s == 't')? 1:0;
+		return true;
+	} else {
+		return false;
+	}
 }
 
 int _cfg_bool(cfg_t *cfg, const char *name, bool *error, u4_t flags)
@@ -600,11 +621,8 @@ int _cfg_bool(cfg_t *cfg, const char *name, bool *error, u4_t flags)
 	bool err = false;
 
 	jsmntok_t *jt = _cfg_lookup_json(cfg, name, CFG_OPT_NONE);
-	char *s = jt? &cfg->json[jt->start] : NULL;
-	if (!(jt && jt->type == JSMN_PRIMITIVE && (*s == 't' || *s == 'f'))) {
+	if (!jt || jt == CFG_LOOKUP_LVL1 || _cfg_bool_json(cfg, jt, &num) == false) {
 		err = true;
-	} else {
-		num = (*s == 't')? 1:0;
 	}
 	if (error) *error = err;
 	if (err) {
@@ -623,7 +641,8 @@ int _cfg_set_bool(cfg_t *cfg, const char *name, u4_t val, u4_t flags, int pos)
 	int slen;
 	char *s;
 	char *id2 = strchr((char *) name, '.') + 1;
-	jsmntok_t *jt = _cfg_lookup_json(cfg, name, CFG_OPT_NONE);
+	//jsmntok_t *jt = _cfg_lookup_json(cfg, name, CFG_OPT_NONE);
+	jsmntok_t *jt = _cfg_lookup_json(cfg, name, (flags & CFG_NO_DOT)? CFG_OPT_NO_DOT : CFG_OPT_NONE);
 	
 	if (flags & CFG_REMOVE) {
 		if (!jt || jt == CFG_LOOKUP_LVL1) {
@@ -632,7 +651,7 @@ int _cfg_set_bool(cfg_t *cfg, const char *name, u4_t val, u4_t flags, int pos)
 		}
 
 		s = &cfg->json[jt->start];
-		assert(jt->type == JSMN_PRIMITIVE && (*s == 't' || *s == 'f'));
+		assert(JSMN_IS_PRIMITIVE(jt) && (*s == 't' || *s == 'f'));
 		
 		// ,"id":t/f or {"id":t/f
 		//   ^start
@@ -681,9 +700,9 @@ bool _cfg_default_bool(cfg_t *cfg, const char *name, u4_t val, bool *error_p)
 	if (error) {
 		_cfg_set_bool(cfg, name, val, CFG_SET, 0);
 		existing = val;
-		printf("_cfg_default_bool: %s = %s\n", name, val? "true" : "false");
+		//printf("_cfg_default_bool: %s = %s\n", name, val? "true" : "false");
 	}
-	*error_p = *error_p | error;
+	if (error_p) *error_p = *error_p | error;
 	return existing;
 }
 
@@ -769,11 +788,11 @@ void _cfg_default_string(cfg_t *cfg, const char *name, const char *val, bool *er
 	const char *s = _cfg_string(cfg, name, &error, CFG_OPTIONAL);
 	if (error) {
 		_cfg_set_string(cfg, name, val, CFG_SET, 0);
-		printf("_cfg_default_string: %s = %s\n", name, val);
+		//printf("_cfg_default_string: %s = %s\n", name, val);
 	} else {
 		_cfg_free(cfg, s);
 	}
-	*error_p = *error_p | error;
+	if (error_p) *error_p = *error_p | error;
 }
 
 
@@ -811,7 +830,7 @@ int _cfg_set_object(cfg_t *cfg, const char *name, const char *val, u4_t flags, i
 		}
 		
 		s = &cfg->json[jt->start];
-		assert(jt->type == JSMN_OBJECT && *s == '{');
+		assert(JSMN_IS_OBJECT(jt) && *s == '{');
 		
 		// ,"id":{...} or {"id":{...}
 		//   ^start
@@ -870,7 +889,7 @@ bool cfg_print_tok(cfg_t *cfg, void *param, jsmntok_t *jt, int seq, int hit, int
 	case JSMN_ARRAY:
 		if (seq == -1)
 			// virtual token
-			printf("%6s #%02d '%c'\n", jsmntype_s[jt->type], jt->size, (jt->type == JSMN_OBJECT)? '}':']');
+			printf("%6s #%02d '%c'\n", jsmntype_s[jt->type], jt->size, (JSMN_IS_OBJECT(jt))? '}':']');
 		else
 			printf("%6s #%02d '%c' %d-%d\n", jsmntype_s[jt->type], jt->size, s[0], jt->start, jt->end);
 		break;
@@ -912,7 +931,7 @@ void *_cfg_walk(cfg_t *cfg, const char *id, cfg_walk_cb_t cb, void *param)
 			remstk[lvl]--;
 		}
 
-		if (jt->type == JSMN_OBJECT || jt->type == JSMN_ARRAY) {
+		if (JSMN_IS_OBJECT(jt) || JSMN_IS_ARRAY(jt)) {
 			lvl++;
 			if (!id || _lvl == hit) {
 				if (cb(cfg, param, jt, i, hit, _lvl, _rem, &rval))
@@ -949,6 +968,10 @@ void *_cfg_walk(cfg_t *cfg, const char *id, cfg_walk_cb_t cb, void *param)
 
 static bool _cfg_parse_json(cfg_t *cfg, bool doPanic)
 {
+    // the dx list can be huge, so yield during the time-consuming parsing process
+    bool yield = (cfg == &cfg_dx && !cfg->init_load);
+    //printf("_cfg_parse_json %s yield=%d\n", cfg->filename, yield);
+    
 	if (cfg->tok_size == 0)
 		cfg->tok_size = 64;
 	
@@ -964,12 +987,12 @@ static bool _cfg_parse_json(cfg_t *cfg, bool doPanic)
 		cfg->tokens = (jsmntok_t *) kiwi_malloc("cfg tokens", sizeof(jsmntok_t) * cfg->tok_size);
 
 		jsmn_init(&parser);
-		if ((rc = jsmn_parse(&parser, cfg->json, slen, cfg->tokens, cfg->tok_size)) >= 0)
+		if ((rc = jsmn_parse(&parser, cfg->json, slen, cfg->tokens, cfg->tok_size, yield)) >= 0)
 			break;
 		
 		if (rc == JSMN_ERROR_NOMEM) {
 			//printf("not enough tokens (%d) were provided\n", cfg->tok_size);
-			cfg->tok_size *= 2;		// keep going until we hit safety limit in kiwi_malloc()
+			cfg->tok_size *= 4;		// keep going until we hit safety limit in kiwi_malloc()
 		} else {
 			lprintf("cfg_parse_json: file %s line=%d pos=%d tok=%d\n",
 				cfg->filename, parser.line, parser.pos, parser.toknext);
@@ -1022,19 +1045,17 @@ char *_cfg_realloc_json(cfg_t *cfg, int new_size, u4_t flags)
 static bool _cfg_load_json(cfg_t *cfg)
 {
 	int i;
-	FILE *fp;
 	size_t n;
-	
-	if ((fp = fopen(cfg->filename, "r")) == NULL)
-		return false;
 	
 	struct stat st;
 	scall("stat", stat(cfg->filename, &st));
 	_cfg_realloc_json(cfg, st.st_size + SPACE_FOR_NULL, CFG_NONE);
 	
-	n = fread(cfg->json, 1, cfg->json_buf_size, fp);
-	assert(n > 0 && n < cfg->json_buf_size);
-	fclose(fp);
+    FILE *fp;
+    scallz("_cfg_load_json fopen", (fp = fopen(cfg->filename, "r")));
+    n = fread(cfg->json, 1, cfg->json_buf_size, fp);
+    assert(n > 0 && n < cfg->json_buf_size);
+    fclose(fp);
 
 	// turn into a string
 	cfg->json[n] = '\0';
@@ -1053,21 +1074,37 @@ static bool _cfg_load_json(cfg_t *cfg)
 	return true;
 }
 
+static void _cfg_write_file(void *param)
+{
+    cfg_t *cfg = (cfg_t *) FROM_VOID_PARAM(param);
+	FILE *fp;
+
+	scallz("_cfg_write_file fopen", (fp = fopen(cfg->filename, "w")));
+	fprintf(fp, "%s\n", cfg->json_write);
+	fclose(fp);
+	exit(0);
+}
+
 // FIXME guard better against file getting trashed
 void _cfg_save_json(cfg_t *cfg, char *json)
 {
-	FILE *fp;
+    // file writes can sometimes take a long time -- use a child task and wait via NextTask()
+	cfg->json_write = json;
+	//printf("_cfg_save_json fn=%s json=%d\n", cfg->filename, strlen(cfg->json_write));
+    int status = child_task("kiwi.cfg", POLL_MSEC(10), _cfg_write_file, TO_VOID_PARAM(cfg));
+    int exit_status;
+    if (WIFEXITED(status) && (exit_status = WEXITSTATUS(status))) {
+        printf("_cfg_write_file exit_status=0x%x\n", exit_status);
+    }
 
-	//printf("_cfg_save_json fn=%s json=%s\n", cfg->filename, json);
-	scallz("_cfg_save_json fopen", (fp = fopen(cfg->filename, "w")));
-	fprintf(fp, "%s\n", json);
-	fclose(fp);
-	
 	// if new buffer is different update our copy
 	if (!cfg->json || (cfg->json && cfg->json != json)) {
 		_cfg_realloc_json(cfg, strlen(json) + SPACE_FOR_NULL, CFG_NONE);
 		strcpy(cfg->json, json);
 	}
 
+    // This takes forever. But we fixed it by putting a NextTask() in jsmn_parse().
+    //u4_t ms = timer_ms();
 	_cfg_parse_json(cfg, true);
+    //printf("_cfg_parse_json %d msec\n", timer_ms() - ms);
 }

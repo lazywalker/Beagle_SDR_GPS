@@ -36,8 +36,9 @@ Boston, MA  02110-1301, USA.
 #include "nbuf.h"
 #include "cfg.h"
 #include "str.h"
-#include "ext_int.h"
-#include "sha256.h"
+#include "rx.h"
+#include "clk.h"
+#include "spi.h"
 
 // This file is compiled twice into two different object files:
 // Once with EDATA_EMBED defined when installed as the production server in /usr/local/bin
@@ -159,10 +160,19 @@ static const char* edata(const char *uri, bool cache_check, size_t *size, u4_t *
 		if (cache_check ||
 		    (!cache_check && (last_uri2_read == NULL || strlen(uri2) != strlen(last_uri2_read) || strcmp(uri2, last_uri2_read) != 0))) {
             //printf(">CONSIDER cache_check=%d %s\n", cache_check, uri2);
-			int fd = open(uri2, O_RDONLY);
-			if (fd >= 0) {
-                struct stat st;
-                fstat(fd, &st);
+            bool fail = false;
+            int fd;
+            
+            struct stat st;
+            if (stat(uri2, &st) < 0) {
+                fail = true;
+            } else
+            if ((st.st_mode & S_IFMT) != S_IFREG) {
+                fail = true;
+            } else
+            if ((fd = open(uri2, O_RDONLY)) < 0) {
+                fail = true;
+            } else {
                 last_size = *size = st.st_size;
                 last_mtime = st.st_mtime;
 
@@ -170,15 +180,20 @@ static const char* edata(const char *uri, bool cache_check, size_t *size, u4_t *
                     //printf(">FREE %p\n", last_free);
                     kiwi_free("edata_file", (void *) last_free);
                 }
+                
                 last_free = last_data = data = (char *) kiwi_malloc("edata_file", *size);
                 ssize_t rsize = read(fd, (void *) data, *size);
-                assert(rsize == *size);
-                //printf(">READ %p %d %s\n", last_data, last_size, uri2);
                 close(fd);
-
-                if (last_uri2_read != NULL) free(last_uri2_read);
-                last_uri2_read = strdup(uri2);
-            } else {
+                if (rsize != *size) {
+                    fail = true;
+                } else {
+                    //printf(">READ %p %d %s\n", last_data, last_size, uri2);
+                    if (last_uri2_read != NULL) free(last_uri2_read);
+                    last_uri2_read = strdup(uri2);
+                }
+            }
+            
+            if (fail) {
                 if (last_uri2_read != NULL) free(last_uri2_read);
                 last_uri2_read = NULL;
                 nofile = true;
@@ -230,44 +245,50 @@ static const char* edata(const char *uri, bool cache_check, size_t *size, u4_t *
 }
 
 struct iparams_t {
-	char *id, *val;
+	char *id, *encoded, *decoded;
 };
 
 #define	N_IPARAMS	256
 static iparams_t iparams[N_IPARAMS];
 static int n_iparams;
 
-void iparams_add(const char *id, char *val)
+void iparams_add(const char *id, char *encoded)
 {
+    // Save encoded in case it's a string. This is needed for
+    // substitution in .js files and decoded is needed for substitution in HTML files.
 	iparams_t *ip = &iparams[n_iparams];
 	asprintf(&ip->id, "%s", (char *) id);
-	asprintf(&ip->val, "%s", val);
-	ip++; n_iparams++;
+	asprintf(&ip->encoded, "%s", encoded);
+	int n = strlen(encoded);
+    ip->decoded = (char *) malloc(n + SPACE_FOR_NULL);
+    mg_url_decode(ip->encoded, n, ip->decoded, n + SPACE_FOR_NULL, 0);
+    //printf("iparams_add: %d %s <%s>\n", n_iparams, ip->id, ip->decoded);
+	n_iparams++;
 }
 
 bool index_params_cb(cfg_t *cfg, void *param, jsmntok_t *jt, int seq, int hit, int lvl, int rem, void **rval)
 {
 	char *json = cfg_get_json(NULL);
-	if (json == NULL || jt->type != JSMN_STRING)
+	if (json == NULL || rem == 0)
 		return false;
 	
+    static char *id_last;
+
 	check(n_iparams < N_IPARAMS);
 	iparams_t *ip = &iparams[n_iparams];
 	char *s = &json[jt->start];
 	int n = jt->end - jt->start;
 	if (JSMN_IS_ID(jt)) {
-		ip->id = (char *) malloc(n + SPACE_FOR_NULL);
-		mg_url_decode(s, n, (char *) ip->id, n + SPACE_FOR_NULL, 0);
-		//printf("index_params_cb: %d %d/%d/%d/%d ID %d <%s>\n", n_iparams, seq, hit, lvl, rem, n, ip->id);
+		id_last = (char *) malloc(n + SPACE_FOR_NULL);
+		mg_url_decode(s, n, id_last, n + SPACE_FOR_NULL, 0);
+		//printf("index_params_cb: %d %d/%d/%d/%d ID %d <%s>\n", n_iparams, seq, hit, lvl, rem, n, id_last);
 	} else {
-		ip->val = (char *) malloc(n + SPACE_FOR_NULL);
-		// Leave it encoded in case it's a string. [not done currently because although this fixes
-		// substitution in .js files it breaks inline substitution for HTML files]
-		// Non-string types shouldn't have any escaped characters.
-		//strncpy(ip->val, s, n); ip->val[n] = '\0';
-		mg_url_decode(s, n, (char *) ip->val, n + SPACE_FOR_NULL, 0);
-		//printf("index_params_cb: %d %d/%d/%d/%d %s: %s\n", n_iparams, seq, hit, lvl, rem, ip->id, ip->val);
-		n_iparams++;
+		char *encoded = (char *) malloc(n + SPACE_FOR_NULL);
+		kiwi_strncpy(encoded, s, n + SPACE_FOR_NULL);
+		//printf("index_params_cb: %d %d/%d/%d/%d VAL %s: <%s>\n", n_iparams, seq, hit, lvl, rem, id_last, encoded);
+		iparams_add(id_last, encoded);
+		free(id_last);
+		free(encoded);
 	}
 	
 	return false;
@@ -277,29 +298,24 @@ void reload_index_params()
 {
 	int i;
 	
-	//printf("reload_index_params: free %d\n", n_iparams);
-	for (i=0; i < n_iparams; i++) {
-		free(iparams[i].id);
-		free(iparams[i].val);
-	}
+	// don't free previous on reload because not all were malloc()'d
+	// (the memory loss is very small)
 	n_iparams = 0;
 	//cfg_walk("index_html_params", cfg_print_tok, NULL);
 	cfg_walk("index_html_params", index_params_cb, NULL);
-	
-	
-	// add the list of extensions
-	// FIXME move this outside of the repeated calls to reload_index_params
-	iparams_t *ip = &iparams[n_iparams];
-	asprintf(&ip->id, "EXT_LIST_JS");
-	char *s = extint_list_js();
-	asprintf(&ip->val, "%s", kstr_sp(s));
-	kstr_free(s);
-	//printf("EXT_LIST_JS: %d %s", n_iparams, ip->val);
-	ip++; n_iparams++;
 
 	char *cs = (char *) cfg_string("owner_info", NULL, CFG_REQUIRED);
 	iparams_add("OWNER_INFO", cs);
 	cfg_string_free(cs);
+
+	// add the list of extensions
+#if RX_CHANS
+	char *s = extint_list_js();
+	iparams_add("EXT_LIST_JS", kstr_sp(s));
+	kstr_free(s);
+#else
+	iparams_add("EXT_LIST_JS", (char *) "");
+#endif
 }
 
 
@@ -371,12 +387,10 @@ int web_to_app(conn_t *c, nbuf_t **nbp)
 {
 	nbuf_t *nb;
 	
+    *nbp = NULL;
 	if (c->stop_data) return 0;
 	nb = nbuf_dequeue(&c->c2s);
-	if (!nb) {
-		*nbp = NULL;
-		return 0;
-	}
+	if (!nb) return 0;
 	assert(!nb->done && !nb->expecting_done && nb->buf && nb->len);
 	nb->expecting_done = TRUE;
 	*nbp = nb;
@@ -401,6 +415,10 @@ void web_to_app_done(conn_t *c, nbuf_t *nb)
 void app_to_web(conn_t *c, char *s, int sl)
 {
 	if (c->stop_data) return;
+	if (c->internal_connection) {
+	    //printf("app_to_webinternal_connection sl=%d\n", sl);
+	    return;
+	}
 	nbuf_allocq(&c->s2c, s, sl);
 	//NextTask("s2c");
 }
@@ -433,7 +451,7 @@ static int request(struct mg_connection *mc, enum mg_event ev) {
 			return MG_TRUE;	// keepalive?
 		}
 		
-		conn_t *c = rx_server_websocket(mc, WS_MODE_ALLOC);
+		conn_t *c = rx_server_websocket(WS_MODE_ALLOC, mc);
 		if (c == NULL) {
 			s[sl]=0;
 			//if (!down) lprintf("rx_server_websocket(alloc): msg was %d <%s>\n", sl, s);
@@ -450,13 +468,15 @@ static int request(struct mg_connection *mc, enum mg_event ev) {
 		
 		return MG_TRUE;
 	}
-	
-    bool is_sdr_hu = ip_match(mc->remote_ip, ddns.ips_sdr_hu);
-    //printf("is_sdr_hu=%d %s \"%s\" %s\n", is_sdr_hu, mc->remote_ip, ddns.ips_sdr_hu[0], mc->uri);
+    
+    char remote_ip[NET_ADDRSTRLEN];
+    check_if_forwarded(NULL, mc, remote_ip);
+    bool is_sdr_hu = ip_match(remote_ip, &ddns.ips_sdr_hu);
+    //printf("is_sdr_hu=%d %s %s\n", is_sdr_hu, remote_ip, mc->uri);
 		
 	if (ev == MG_CACHE_RESULT) {
 		web_printf("MG_CACHE_RESULT %s:%05d%s cached=%s (etag_match=%d || not_mod_since=%d) mtime=%lu/%lx",
-			mc->remote_ip, mc->remote_port, is_sdr_hu? "[sdr.hu]":"",
+			remote_ip, mc->remote_port, is_sdr_hu? "[sdr.hu]":"",
 			mc->cache_info.cached? "YES":"NO", mc->cache_info.etag_match, mc->cache_info.not_mod_since,
 			mc->cache_info.st.st_mtime, mc->cache_info.st.st_mtime);
 
@@ -497,7 +517,7 @@ static int request(struct mg_connection *mc, enum mg_event ev) {
 		char *suffix = strrchr(o_uri, '.');
 		
 		if (suffix && (strcmp(suffix, ".json") == 0 || strcmp(suffix, ".json/") == 0)) {
-			lprintf("attempt to fetch config file: %s query=<%s> from %s\n", o_uri, mc->query_string, mc->remote_ip);
+			lprintf("attempt to fetch config file: %s query=<%s> from %s\n", o_uri, mc->query_string, ip_remote(mc));
 			return MG_FALSE;
 		}
 		
@@ -581,28 +601,18 @@ static int request(struct mg_connection *mc, enum mg_event ev) {
 		        } else {
 		            char *su_m = NULL;
                     if (sscanf(qs[i], "su=%256ms", &su_m) == 1) {
-                        SHA256_CTX ctx;
-                        sha256_init(&ctx);
-                        int su_len = strlen(su_m);
-                        sha256_update(&ctx, (BYTE *) su_m, su_len);
-                        bzero(su_m, su_len);
-	                    BYTE su_bin[SHA256_BLOCK_SIZE];
-                        sha256_final(&ctx, su_bin);
-                        bzero(&ctx, sizeof(ctx));
-                        char su_s[SHA256_BLOCK_SIZE*2 + SPACE_FOR_NULL];
-                        mg_bin2str(su_s, su_bin, SHA256_BLOCK_SIZE);
-                        //printf("SHA su %s %s\n", su_s, uri);
-                        
-                        if (strcmp(su_s, "7cdd62b9f85bb7a8f9d85595c4e488d8090c435cf71f8dd41ff7177ea6735189") == 0) {
+                        if (kiwi_sha256_strcmp(su_m, "7cdd62b9f85bb7a8f9d85595c4e488d8090c435cf71f8dd41ff7177ea6735189") == 0) {
                             auth_su = true;     // a little dodgy that we have to use a global -- be sure to reset asap
+                            kiwi_strncpy(auth_su_remote_ip, remote_ip, NET_ADDRSTRLEN);
                         }
             
                         // erase cleartext as much as possible
+                        bzero(su_m, strlen(su_m));
                         int slen = strlen(mc->query_string);
                         bzero(r_buf, slen);
                         bzero((char *) mc->query_string, slen);
                         free(su_m);
-                        break;      // have to stop because everything is erased
+                        break;      // have to stop because query string is now erased
                     }
                     free(su_m);
 		        }
@@ -657,7 +667,7 @@ static int request(struct mg_connection *mc, enum mg_event ev) {
 
 		// give up
 		if (!edata_data) {
-			printf("unknown URL: %s (%s) query=<%s> from %s\n", o_uri, uri, mc->query_string, mc->remote_ip);
+			//printf("unknown URL: %s (%s) query=<%s> from %s\n", o_uri, uri, mc->query_string, ip_remote(mc));
 			if (free_uri) free(uri);
 			return MG_FALSE;
 		}
@@ -687,14 +697,14 @@ static int request(struct mg_connection *mc, enum mg_event ev) {
 					for (i=0; i < n_iparams; i++) {
 						iparams_t *ip = &iparams[i];
 						if (strncmp(pp, ip->id, pl) == 0) {
-							sl = strlen(ip->val);
+							sl = strlen(ip->decoded);
 
 							// expand buffer
 							html_data = (char *) kiwi_realloc("html_data", html_data, nsize+sl);
 							np = html_data + nl;		// in case buffer moved
 							nsize += sl;
-							//printf("%d %%[%s] %d <%s> %s\n", nsize, ip->id, sl, ip->val, uri);
-							strcpy(np, ip->val); np += sl; nl += sl;
+							//printf("%d %%[%s] %d <%s> %s\n", nsize, ip->id, sl, ip->decoded, uri);
+							strcpy(np, ip->decoded); np += sl; nl += sl;
 							dirty = true;
 							break;
 						}
@@ -755,7 +765,7 @@ static int request(struct mg_connection *mc, enum mg_event ev) {
 
 		if (!(isAJAX && ev == MG_CACHE_INFO)) {		// don't print for isAJAX + MG_CACHE_INFO nop case
 			web_printf("%-15s %s:%05d%s size=%6d dirty=%d mtime=%lu/%lx %s %s %s%s\n", (ev == MG_CACHE_INFO)? "MG_CACHE_INFO" : "MG_REQUEST",
-				mc->remote_ip, mc->remote_port, is_sdr_hu? "[sdr.hu]":"",
+				remote_ip, mc->remote_port, is_sdr_hu? "[sdr.hu]":"",
 				mc->cache_info.st.st_size, dirty, mtime, mtime, isAJAX? mc->uri : uri, mg_get_mime_type(isAJAX? mc->uri : uri, "text/plain"),
 				(mc->query_string != NULL)? "qs:" : "", (mc->query_string != NULL)? mc->query_string : "");
 		}
@@ -769,6 +779,7 @@ static int request(struct mg_connection *mc, enum mg_event ev) {
 			}
 		} else {
 		    const char *hdr_type;
+		    bool isPNG = (suffix && strcmp(suffix, ".png") == 0);
 		
 			// NB: prevent AJAX responses from getting cached by not sending standard headers which include etag etc!
 			if (isAJAX) {
@@ -784,12 +795,13 @@ static int request(struct mg_connection *mc, enum mg_event ev) {
 				mg_send_header(mc, "Access-Control-Allow-Origin", "*");
 			    hdr_type = "AJAX";
 			} else
-			if (web_nocache || is_sdr_hu || mobile_device) {     // sdr.hu doesn't like our new caching headers for the avatar
+			if (web_nocache || is_sdr_hu || (mobile_device && !isPNG)) {    // sdr.hu doesn't like our new caching headers for the avatar
 			    mg_send_header(mc, "Content-Type", mg_get_mime_type(uri, "text/plain"));
 			    hdr_type = "non-caching";
 			} else {
 				mg_send_standard_headers(mc, uri, &mc->cache_info.st, "OK", (char *) "", true);
-				mg_send_header(mc, "Cache-Control", "max-age=0");
+				// cache PNGs to keep GPS az/el img from flashing on periodic re-render with Safari
+				mg_send_header(mc, "Cache-Control", isPNG? "max-age=3600" : "max-age=0");
 			    hdr_type = "caching";
 			}
 			web_printf("%-15s %s headers, is_sdr_hu=%d\n", "sending", hdr_type, is_sdr_hu);
@@ -828,7 +840,7 @@ static int ev_handler(struct mg_connection *mc, enum mg_event ev) {
 	} else
 	if (ev == MG_CLOSE) {
 		//printf("MG_CLOSE\n");
-		rx_server_websocket(mc, WS_MODE_CLOSE);
+		rx_server_websocket(WS_MODE_CLOSE, mc);
 		mc->connection_param = NULL;
 		return MG_TRUE;
 	} else
@@ -848,7 +860,7 @@ static int iterate_callback(struct mg_connection *mc, enum mg_event ev)
 	nbuf_t *nb;
 	
 	if (ev == MG_POLL && mc->is_websocket) {
-		conn_t *c = rx_server_websocket(mc, WS_MODE_LOOKUP);
+		conn_t *c = rx_server_websocket(WS_MODE_LOOKUP, mc);
 		if (c == NULL)  return MG_FALSE;
 
 		while (TRUE) {
@@ -860,9 +872,9 @@ static int iterate_callback(struct mg_connection *mc, enum mg_event ev)
 				assert(!nb->done && nb->buf && nb->len);
 
 				#ifdef SND_TIMING_CK
-				// check timing of audio output
-				snd_pkt_t *out = (snd_pkt_t *) nb->buf;
-				if (c->type == STREAM_SOUND && strncmp(out->h.id, "SND ", 4) == 0) {
+				// check timing of audio output (assumes non-IQ mode always selected)
+				snd_pkt_real_t *out = (snd_pkt_real_t *) nb->buf;
+				if (c->type == STREAM_SOUND && strncmp(out->h.id, "SND", 3) == 0) {
 					u4_t now = timer_ms();
 					if (!c->audio_check) {
 						c->audio_epoch = now;
@@ -921,6 +933,18 @@ void web_server(void *param)
 		mg_poll_server(server, 0);		// passing 0 effects a poll
 		mg_iterate_over_connections(server, iterate_callback);
 		TaskSleepUsec(WEB_SERVER_POLL_US);
+		
+		//#define CHECK_ECPU_STACK
+		#ifdef CHECK_ECPU_STACK
+            static int every_1sec;
+            every_1sec += WEB_SERVER_POLL_US;
+            if (every_1sec >= 1000000) {
+                static SPI_MISO sprp;
+                spi_get_noduplex(CmdGetSPRP, &sprp, 4);
+                printf("e_cpu: SP=%04x RP=%04x\n", sprp.word[0], sprp.word[1]);
+                every_1sec = 0;
+            }
+		#endif
 	}
 }
 

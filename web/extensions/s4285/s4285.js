@@ -121,7 +121,7 @@ function s4285_recv(data)
 
 			case "status":
 				var status = decodeURIComponent(param[1]);
-				w3_el_id('id-s4285-status').innerHTML = status;
+				w3_el('id-s4285-status').innerHTML = status;
 				//console.log('s4285_recv: status='+ status);
 				break;
 
@@ -148,11 +148,11 @@ var s4285_canvas;
 function s4285_controls_setup()
 {
    var data_html =
-      '<div id="id-s4285-time-display" style="top:50px; background-color:black; position:relative;"></div>' +
+      time_display_html('s4285') +
 
-      '<div id="id-s4285-data" style="left:100px; width:200px; height:200px; background-color:mediumBlue; overflow:hidden; position:relative; display:none" title="s4285">' +
-   		'<canvas id="id-s4285-canvas" width="200" height="200" style="position:absolute">test</canvas>'+
-      '</div>';
+      w3_div('id-s4285-data|left:100px; width:200px; height:200px; background-color:mediumBlue; overflow:hidden; position:relative;',
+   		'<canvas id="id-s4285-canvas" width="200" height="200" style="position:absolute"></canvas>'
+      );
 
 	var mode_s = { 0:'receive', 1:'tx loopback' };
 	var draw_s = { 0:'points', 1:'density' };
@@ -161,9 +161,9 @@ function s4285_controls_setup()
 		w3_divs('id-s4285-controls w3-text-aqua', '',
 			w3_divs('w3-container', 'w3-tspace-8',
 				w3_divs('', 'w3-medium w3-text-aqua', '<b>STANAG 4285 decoder</b>'),
-				w3_select('Mode', '', 's4285.mode', s4285.mode, mode_s, 's4285_mode_select_cb'),
+				w3_select('', 'Mode', '', 's4285.mode', s4285.mode, mode_s, 's4285_mode_select_cb'),
 				w3_slider('Gain', 's4285.gain', s4285.gain, 0, 100, 1, 's4285_gain_cb'),
-				w3_select('Draw', '', 's4285.draw', s4285.draw, draw_s, 's4285_draw_select_cb'),
+				w3_select('', 'Draw', '', 's4285.draw', s4285.draw, draw_s, 's4285_draw_select_cb'),
 				w3_slider('Points', 's4285.points', s4285.points, 4, 14, 1, 's4285_points_cb'),
 				w3_button('', 'Clear', 's4285_clear_cb'),
 				w3_divs('', 'w3-text-aqua',
@@ -174,22 +174,26 @@ function s4285_controls_setup()
 		);
 
 	ext_panel_show(controls_html, data_html, null);
-	time_display_setup('id-s4285-time-display');
+	time_display_setup('s4285');
+	s4285_resize();
 
-	s4285_canvas = w3_el_id('id-s4285-canvas');
+	s4285_canvas = w3_el('id-s4285-canvas');
 	s4285_canvas.ctx = s4285_canvas.getContext("2d");
 	s4285_imageData = s4285_canvas.ctx.createImageData(200, 1);
 
-	s4285_visible(1);
-
-	s4285_gain_cb('s4285.gain', s4285_gain_init);
-	s4285_points_cb('s4285.points', s4285_points_init);
 	ext_set_mode('usb');
 	ext_set_passband(600, 3000);
-	//msg_send("SET slow=0");
+	//msg_send("SET wf_speed=0");    // WF_SPEED_OFF
 	ext_send('SET mode='+ s4285_mode_init);
 	ext_send('SET run=1');
 	s4285_clear();
+}
+
+function s4285_resize()
+{
+	var el = w3_el('id-s4285-data');
+	var left = (window.innerWidth - 200 - time_display_width()) / 2;
+	el.style.left = px(left);
 }
 
 function s4285_mode_select_cb(path, idx)
@@ -238,8 +242,7 @@ function s4285_blur()
 {
 	console.log('### s4285_blur');
 	ext_send('SET run=0');
-	s4285_visible(0);		// hook to be called when controls panel is closed
-	msg_send("SET slow=2");
+	msg_send("SET wf_speed=-1");   // WF_SPEED_FAST
 }
 
 // called to display HTML for configuration parameters in admin interface
@@ -260,9 +263,4 @@ function s4285_config_html()
 			*/
 		)
 	);
-}
-
-function s4285_visible(v)
-{
-	visible_block('id-s4285-data', v);
 }

@@ -1,8 +1,42 @@
 /* Copyright (c) 2016 John Seamons, ZL/KF6VO */
 
-#id-kiwi-msg-container
+.id-gps-gmap {
+    border: 1px solid #ffffff;
+    box-sizing: border-box;
+}
+
+hr
+{
+    border-top: 1px solid #ddd;
+}
+
+.id-kiwi-msg-container
 {
 	display: none;
+	overflow: visible;
+}
+
+#id-kiwi-msg-logo-container
+{
+	position: relative;
+	height: 80px;
+	margin-top: 15px;
+}
+
+#id-left-logo
+{
+	position: absolute;
+	top: 0px;
+	left: 15px;
+}
+
+#id-left-logo-text
+{
+	position: absolute;
+	bottom: 2pt;
+	left: 54px;
+	font-size: 8pt;
+	color: #909090;
 }
 
 #id-kiwi-msg
@@ -19,7 +53,7 @@
 	-moz-border-radius: 15px;
 }
 
-#id-kiwi-container
+.id-kiwi-container
 {
 	display: none;
 	/* better not default to auto if our children expect to do height:100% to get full screen height */
@@ -95,6 +129,45 @@
 	/*background: cyan;	/* debug */
 }
 
+.cl-tbar-bbox
+{
+    position: absolute;
+	opacity: 0.3;
+}
+
+
+.id-link-cell
+{
+	padding: 0 5px 0 5px;
+}
+
+#id-9-10-cell a
+{
+	padding: 0 5px 0 5px;
+}
+
+.id-button-9-10
+{
+	color: lime;
+}
+
+.id-step-freq img
+{
+	margin-right: 3px;
+}
+
+.id-step-freq img:hover 
+{
+	background: #474747;
+	color: #FFFF50;
+}
+
+.id-step-freq img:active 
+{
+	background: #777777;
+	color: #FFFF50;	
+}
+
 
 /* appearing in class="..." even though "id-..." */
 
@@ -117,6 +190,11 @@
 	margin-left: 10%;
 }
 
+.cl-optbar a
+{
+    padding: 4px 6px;
+}
+
 .cl-admin-check
 {
 	padding: 0px 10px;
@@ -126,7 +204,7 @@
 .id-admin-nav-dom > .w3-current, .id-admin-nav-dom > .w3-current:hover
 {
     color: white;
-    background-color: #4CAF50;
+    background-color: #4CAF50;  /* select green */
     font-weight: bold;
 }
 
@@ -236,4 +314,35 @@
 .kiwi-dbg3
 {
 	border: 1px solid lime;		/* debug */
+}
+
+
+/* font awesome extensions: https://jsfiddle.net/cherrador/jomgLb2h */
+
+.fa-stack > .fa-left
+{
+    position: absolute;
+	line-height: inherit;
+	left: 0;
+	font-size: 1.5em
+}
+
+.fa-stack > .fa-right
+{
+    position: absolute;
+	line-height: inherit;
+	right: 0;
+	font-size: 1.5em
+}
+
+.fa-stack > .fa-nudge-left
+{
+	left: auto;
+	right: 12%;
+}
+
+.fa-stack > .fa-nudge-right
+{
+	left: 12%;
+	right: auto;
 }

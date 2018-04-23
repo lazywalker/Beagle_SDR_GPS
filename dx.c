@@ -89,53 +89,25 @@ void dx_save_as_json()
 	}
 	
 	n = sprintf(cp, "]}"); cp += n;
+	//NextTask("dx_save_as_json");
 	dxcfg_save_json(cfg->json);
-}
-
-static void switch_dx_list(dx_t *_dx_list, int _dx_list_len)
-{
-	qsort(_dx_list, _dx_list_len, sizeof(dx_t), qsort_floatcomp);
-	
-	// switch to new list
-	dx_t *prev_dx_list = dx.list;
-	int prev_dx_list_len = dx.len;
-	dx.list = _dx_list;
-	dx.len = _dx_list_len;
-	dx.hidden_used = false;
-	
-	// release previous
-	if (prev_dx_list) {
-		int i;
-		dx_t *dxp;
-		for (i=0, dxp = prev_dx_list; i < prev_dx_list_len; i++, dxp++) {
-			// previous allocators better have used malloc(), strdup() et al for these and not kiwi_malloc()
-			if (dxp->ident) free((void *) dxp->ident);
-			if (dxp->notes) free((void *) dxp->notes);
-		}
-	}
-	
-	kiwi_free("dx_list", prev_dx_list);
 }
 
 static void dx_mode(dx_t *dxp, const char *s)
 {
-	if (strcmp(s, "AM") == 0) dxp->flags = AM; else
-	if (strcmp(s, "AMN") == 0) dxp->flags = AMN; else
-	if (strcmp(s, "LSB") == 0) dxp->flags = LSB; else
-	if (strcmp(s, "USB") == 0) dxp->flags = USB; else
-	if (strcmp(s, "CW") == 0) dxp->flags = CW; else
-	if (strcmp(s, "CWN") == 0) dxp->flags = CWN; else
-	if (strcmp(s, "NBFM") == 0) dxp->flags = NBFM; else
-
-	// FIXME remove, transitional
-	if (strcmp(s, "am") == 0) dxp->flags = AM; else
-	if (strcmp(s, "amn") == 0) dxp->flags = AMN; else
-	if (strcmp(s, "lsb") == 0) dxp->flags = LSB; else
-	if (strcmp(s, "usb") == 0) dxp->flags = USB; else
-	if (strcmp(s, "cw") == 0) dxp->flags = CW; else
-	if (strcmp(s, "cwn") == 0) dxp->flags = CWN; else
-	if (strcmp(s, "nbfm") == 0) dxp->flags = NBFM; else
-	panic("dx config mode");
+    int i;
+    
+    for (i = 0; i < N_MODE; i++) {
+        if (strcasecmp(s, modu_s[i]) == 0)
+            break;
+    }
+    
+    if (i == N_MODE) {
+	    lprintf("unknown dx config mode \"%s\", defaulting to AM\n", s);
+	    i = 0;
+	}
+	
+	dxp->flags = i;
 }
 
 static void dx_flag(dx_t *dxp, const char *flag)
@@ -201,7 +173,7 @@ static void dx_reload_json(cfg_t *cfg)
 		
 		//printf("dx.json %d %.2f 0x%x \"%s\" \"%s\"\n", i, dxp->freq, dxp->flags, dxp->ident, dxp->notes);
 
-		if (jt->type == JSMN_OBJECT) {
+		if (JSMN_IS_OBJECT(jt)) {
 			jt++;
 			while (jt != end_tok && !JSMN_IS_ARRAY(jt)) {
 				assert(JSMN_IS_ID(jt));
@@ -225,7 +197,31 @@ static void dx_reload_json(cfg_t *cfg)
 		}
 	}
 
-	switch_dx_list(_dx_list, _dx_list_len);
+    //NextTask("dx_reload_json 1");
+	qsort(_dx_list, _dx_list_len, sizeof(dx_t), qsort_floatcomp);
+    //NextTask("dx_reload_json 2");
+    for (i = 0; i < _dx_list_len; i++) _dx_list[i].idx = i;
+    //NextTask("dx_reload_json 3");
+	
+	// switch to new list
+	dx_t *prev_dx_list = dx.list;
+	int prev_dx_list_len = dx.len;
+	dx.list = _dx_list;
+	dx.len = _dx_list_len;
+	dx.hidden_used = false;
+	
+	// release previous
+	if (prev_dx_list) {
+		int i;
+		dx_t *dxp;
+		for (i=0, dxp = prev_dx_list; i < prev_dx_list_len; i++, dxp++) {
+			// previous allocators better have used malloc(), strdup() et al for these and not kiwi_malloc()
+			if (dxp->ident) free((void *) dxp->ident);
+			if (dxp->notes) free((void *) dxp->notes);
+		}
+	}
+	
+	kiwi_free("dx_list", prev_dx_list);
 }
 
 // reload requested, at startup or when file edited by hand

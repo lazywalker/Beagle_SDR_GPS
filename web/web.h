@@ -22,8 +22,18 @@ Boston, MA  02110-1301, USA.
 #include "config.h"
 #include "nbuf.h"
 #include "mongoose.h"
-#include "ext.h"
 #include "non_block.h"
+#include "update.h"
+
+#if RX_CHANS
+ #include "ext.h"
+ #include "ext_int.h"
+#else
+ #define N_EXT 0
+ struct ext_t {
+    const char *name;
+ };
+#endif
 
 #define WEB_PRINTF
 #ifdef WEB_PRINTF
@@ -41,12 +51,7 @@ Boston, MA  02110-1301, USA.
 user_iface_t *find_ui(int port);
 
 struct conn_t;
-
-struct rx_chan_t {
-	bool enabled;
-	bool busy;
-	conn_t *conn_snd;       // the STREAM_SOUND conn
-};
+extern conn_t conns[];
 
 struct stream_t {
 	int type;
@@ -66,7 +71,6 @@ extern stream_t streams[];
 #define	N_CONNS	(RX_CHANS * (N_CONN_SND_WF + N_EXT) + N_ADMIN)
 
 struct ext_t;
-enum update_check_e { WAIT_UNTIL_NO_USERS, FORCE_CHECK, FORCE_BUILD };
 
 struct conn_t {
 	#define CN_MAGIC 0xcafecafe
@@ -94,11 +98,13 @@ struct conn_t {
 	user_iface_t *ui;
 
 	// set only in STREAM_SOUND
-	bool arrived, inactivity_timeout, inactivity_msg_sent, inactivity_timeout_override;
+	bool arrived, inactivity_timeout, inactivity_timeout_override;
 	int freqHz, last_freqHz;
 	int mode, last_mode;
 	int zoom, last_zoom;	// zoom set in both
 	int last_tune_time, last_log_time;
+	int ipl_cur_secs;
+	bool tlimit_exempt;
 	float half_bw;
 	TYPECPX last_sample;
 	char *pref_id, *pref;
@@ -109,10 +115,9 @@ struct conn_t {
 	
 	// set only in STREAM_ADMIN
 	int log_last_sent, log_last_not_shown;
-	bool admin_demo_mode;
 	non_blocking_cmd_t console_nbc;
 	int master_pty_fd, child_pid;
-	bool send_ctrl_c, send_ctrl_backslash;
+	bool send_ctrl_c, send_ctrl_d, send_ctrl_backslash;
 	
 	bool adjust_clock;      // should this connections clock be adjusted?
 	double adc_clock_corrected, manual_offset, srate;
@@ -127,7 +132,6 @@ struct conn_t {
 	// debug
 	int wf_frames;
 	u4_t wf_loop, wf_lock, wf_get;
-	bool first_slow;
 	u4_t audio_underrun, sequence_errors;
 
 	#ifdef SND_TIMING_CK
@@ -139,16 +143,15 @@ struct conn_t {
 };
 
 // conn_t.type
-#define STREAM_SOUND		0
-#define STREAM_WATERFALL	1
-#define STREAM_ADMIN		2
-#define STREAM_MFG			3
-#define STREAM_EXT			4
-#define AJAX_DISCOVERY		5
-#define AJAX_PHOTO			6
-#define AJAX_VERSION		7
+#define AJAX_VERSION		0
+#define STREAM_ADMIN		1
+#define STREAM_SOUND		2
+#define STREAM_WATERFALL	3
+#define STREAM_MFG			4
+#define STREAM_EXT			5
+#define AJAX_DISCOVERY		6
+#define AJAX_PHOTO			7
 #define AJAX_STATUS			8
-#define AJAX_DUMP			9
 
 void app_to_web(conn_t *c, char *s, int sl);
 

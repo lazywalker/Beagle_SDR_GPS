@@ -44,33 +44,60 @@ Boston, MA  02110-1301, USA.
 
 #ifdef HOST
 	#include <wait.h>
+    #include <sys/prctl.h>
 #endif
 
-int child_task(int poll_msec, funcP_t func, void *param)
+int child_task(const char *pname, int poll_msec, funcP_t func, void *param)
 {
-	pid_t child;
-	scall("fork", (child = fork()));
+    // If the child is not going to be waited for because poll_msec == NO_WAIT then it will end up as
+    // a zombie process unless we eventually wait for it.
+    // We accomplish this by waiting for all child processes in the waitpid() below and detect the zombies.
+
+	pid_t child_pid;
+	scall("fork", (child_pid = fork()));
 	
-	if (child == 0) {
+	if (child_pid == 0) {
 		TaskForkChild();
+
+        // rename process as seen by top command
+        #ifdef HOST
+            prctl(PR_SET_NAME, (unsigned long) pname, 0, 0, 0);
+        #endif
+        // rename process as seen by ps command
+        int sl = strlen(main_argv[0]);
+        sprintf(main_argv[0], "%-*.*s", sl, sl, pname);     // have to blank fill, and not overrun, old argv[0]
+        
 		func(param);	// this function should exit() with some other value if it wants
-		exit(0);
+		exit(EXIT_SUCCESS);
 	}
 	
-	int pid, status, polls = 0;
+	// parent
+	
+    //printf("==== child_task: child_pid=%d %s pname=%s\n", child_pid, (poll_msec == 0)? "NO_WAIT":"WAIT", pname);
+	if (poll_msec == 0) return 0;   // don't wait
+	
+	int pid = 0, status, polls = 0;
 	do {
-		TaskSleepMsec(poll_msec);
-		polls += poll_msec;
+	    if (pid == 0) {
+            TaskSleepMsec(poll_msec);
+            polls += poll_msec;
+        }
 		status = 0;
-		pid = waitpid(child, &status, WNOHANG);
-		//printf("child_task func=%p pid=%d status=%d poll=%d polls=%d\n", func, pid, status, poll_msec, polls);
-		if (pid < 0) sys_panic("child_task waitpid");
-	} while (pid == 0);
+		pid = waitpid(-1, &status, WNOHANG);
+        //printf("==== child_task: waitpid child_pid=%d pid=%d pname=%s status=%d poll=%d polls=%d\n", child_pid, pid, pname, status, poll_msec, polls);
+		//if (pid == 0) printf("==== child_task: child_pid=%d NOT YET\n", child_pid);
+		//if (pid == child_pid) printf("==== child_task: child_pid=%d DONE\n", child_pid);
+		//if (pid < 0) printf("==== child_task: child_pid=%d ERROR\n", child_pid);
+		//if (pid < 0) perror("child_task: waitpid");
+		//if (pid > 0 && pid != child_pid) printf("==== child_task: child_pid=%d ZOMBIE pid=%d\n", child_pid, pid);
+	} while (pid != child_pid && pid != -1);
 
-	int exited = WIFEXITED(status);
-	int exit_status = WEXITSTATUS(status);
-    //printf("child_task exited=%d exit_status=%d status=0x%08x\n", exited, exit_status, status);
-	return (exited? exit_status : -1);
+    //printf("child_task status=0x%08x WIFEXITED=%d WEXITSTATUS=%d\n", status, WIFEXITED(status), WEXITSTATUS(status));
+    if (!WIFEXITED(status))
+        printf("child_task WARNING: child returned without WIFEXITED status=0x%08x WIFEXITED=%d WEXITSTATUS=%d\n",
+            status, WIFEXITED(status), WEXITSTATUS(status));
+
+    return status;
 }
 
 #define NON_BLOCKING_POLL_MSEC 50
@@ -87,9 +114,9 @@ static void _non_blocking_cmd_forall(void *param)
 
     //printf("_non_blocking_cmd_forall: %s\n", args->cmd);
 	FILE *pf = popen(args->cmd, "r");
-	if (pf == NULL) exit(-1);
+	if (pf == NULL) exit(EXIT_FAILURE);
 	int pfd = fileno(pf);
-	if (pfd <= 0) exit(-1);
+	if (pfd <= 0) exit(EXIT_FAILURE);
 	fcntl(pfd, F_SETFL, O_NONBLOCK);
 
 	do {
@@ -125,9 +152,9 @@ static void _non_blocking_cmd_foreach(void *param)
 	args->bp = NULL;
 
 	FILE *pf = popen(args->cmd, "r");
-	if (pf == NULL) exit(-1);
+	if (pf == NULL) exit(EXIT_FAILURE);
 	int pfd = fileno(pf);
-	if (pfd <= 0) exit(-1);
+	if (pfd <= 0) exit(EXIT_FAILURE);
 	fcntl(pfd, F_SETFL, O_NONBLOCK);
 
 	do {
@@ -148,16 +175,32 @@ static void _non_blocking_cmd_foreach(void *param)
 }
 */
 
+static void _non_blocking_cmd_system(void *param)
+{
+	char *cmd = (char *) param;
+
+    //printf("_non_blocking_cmd_system: %s\n", cmd);
+    int rv = system(cmd);
+	exit(rv);
+}
+
 // like non_blocking_cmd() below, but run in a child process because pclose() can block
 // for long periods of time under certain conditions
-int non_blocking_cmd_child(const char *cmd, funcPR_t func, int param)
+int non_blocking_cmd_func_child(const char *pname, const char *cmd, funcPR_t func, int param, int poll_msec)
 {
 	nbcmd_args_t *args = (nbcmd_args_t *) malloc(sizeof(nbcmd_args_t));
 	args->cmd = cmd;
 	args->func = func;
 	args->func_param = param;
-	int status = child_task(SEC_TO_MSEC(1), _non_blocking_cmd_forall, (void *) args);
+	int status = child_task(pname, poll_msec, _non_blocking_cmd_forall, (void *) args);
 	free(args);
+    //printf("non_blocking_cmd_child %d\n", status);
+	return status;
+}
+
+int non_blocking_cmd_system_child(const char *pname, const char *cmd, int poll_msec)
+{
+	int status = child_task(pname, poll_msec, _non_blocking_cmd_system, (void *) cmd);
     //printf("non_blocking_cmd_child %d\n", status);
 	return status;
 }

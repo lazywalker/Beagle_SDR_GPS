@@ -50,10 +50,10 @@ void gps_main(int argc, char *argv[])
     for(int i=0; i<gps_chans; i++) {
     	char *tname;
     	asprintf(&tname, "GPSchan-%02d", i+1);
-    	CreateTaskSP(ChanTask, tname, TO_VOID_PARAM(i), GPS_PRIORITY);
+    	CreateTaskSF(ChanTask, tname, TO_VOID_PARAM(i), GPS_PRIORITY, CTF_TNAME_FREE, 0);
     }
 
     CreateTask(SolveTask, 0, GPS_PRIORITY);
 
-    if (!background_mode && print_stats) CreateTask(StatTask, 0, GPS_PRIORITY);
+    if (!background_mode && (print_stats & (STATS_GPS | STATS_GPS_SOLN))) CreateTask(StatTask, 0, GPS_PRIORITY);
 }

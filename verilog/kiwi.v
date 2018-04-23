@@ -103,11 +103,8 @@ module KiwiSDR (
     //////////////////////////////////////////////////////////////////////////
     // clocks
 
-    wire clk_slow;
     wire gps_clk, adc_clk, cpu_clk;
     
-	localparam CLOCK_ID = 4'd0;
-
     IBUFG vcxo_ibufg(.I(ADC_CLKIN), .O(adc_clk));
 	assign ADC_CLKEN = ctrl[CTRL_OSC_EN];
 
@@ -152,6 +149,12 @@ module KiwiSDR (
 	assign P9[3] = ctrl[CTRL_UNUSED_OUT];
 	assign P9[4] = ctrl[CTRL_UNUSED_OUT];
 
+`ifdef MEAS_CIC_OUT
+    wire [7:0] cic_out;
+	assign P8[7:0] = cic_out;
+	assign P8[8] = ctrl[CTRL_UNUSED_OUT];
+	assign P8[9] = ctrl[CTRL_UNUSED_OUT];
+`else
 	assign P8[0] = ctrl[CTRL_UNUSED_OUT];
 	assign P8[1] = ctrl[CTRL_UNUSED_OUT];
 	assign P8[2] = ctrl[CTRL_UNUSED_OUT];
@@ -162,11 +165,23 @@ module KiwiSDR (
 	assign P8[7] = ctrl[CTRL_UNUSED_OUT];
 	assign P8[8] = ctrl[CTRL_UNUSED_OUT];
 	assign P8[9] = ctrl[CTRL_UNUSED_OUT];
-	
+`endif
+    
 	wire unused_inputs = IF_MAG | P9[2];
-	
+
     wire [15:0] status;
-    assign status[15:0] = { rx_overflow, 2'b0, unused_inputs, FPGA_VER, CLOCK_ID, FPGA_ID };
+    wire [3:0] stat_user = { 3'b0, dna_data };
+    // when the firmware returns status it replaces stat_replaced with FW_ID
+    wire [2:0] stat_replaced = { 2'b0, unused_inputs };
+    wire [3:0] fpga_id = { FPGA_ID };
+    assign status[15:0] = { rx_overflow, stat_replaced, FPGA_VER, stat_user, fpga_id };
+
+
+    //////////////////////////////////////////////////////////////////////////
+    // device DNA
+    
+    wire dna_data;
+    DNA_PORT dna(.CLK(ctrl[CTRL_DNA_CLK]), .READ(ctrl[CTRL_DNA_READ]), .SHIFT(ctrl[CTRL_DNA_SHIFT]), .DIN(1'b1), .DOUT(dna_data));
 
 
     //////////////////////////////////////////////////////////////////////////
@@ -175,9 +190,9 @@ module KiwiSDR (
 	wire rx_rd, wf_rd;
 	wire [15:0] rx_dout, wf_dout;
 	
-	wire [1:0] ticks_sel;
-	wire [15:0] ticks_A;
+	wire [47:0] ticks_A;
 	
+`ifdef MEAS_CIC_OUT
     RECEIVER receiver (
     	.adc_clk	(adc_clk),
     	.adc_data	(reg_adc_data),
@@ -189,7 +204,33 @@ module KiwiSDR (
         .wf_rd_C	(wf_rd),
         .wf_dout_C	(wf_dout),
 
-        .ticks_sel	(ticks_sel),
+        .ticks_A	(ticks_A),
+        
+		.cpu_clk	(cpu_clk),
+        .ser		(ser[1]),        
+        .tos		(tos),
+        .op			(op),        
+        .rdReg      (rdReg),
+        .rdBit2     (rdBit2),
+        .wrReg2     (wrReg2),
+        .wrEvt2     (wrEvt2),
+        
+        .ctrl       (ctrl),
+        
+        .cic_out    (cic_out)
+    	);
+`else
+    RECEIVER receiver (
+    	.adc_clk	(adc_clk),
+    	.adc_data	(reg_adc_data),
+
+		// these are all on the cpu_clk
+        .rx_rd_C	(rx_rd),
+        .rx_dout_C	(rx_dout),
+
+        .wf_rd_C	(wf_rd),
+        .wf_dout_C	(wf_dout),
+
         .ticks_A	(ticks_A),
         
 		.cpu_clk	(cpu_clk),
@@ -203,6 +244,7 @@ module KiwiSDR (
         
         .ctrl       (ctrl)
     	);
+`endif
     
 	wire rx_ovfl;
 	SYNC_PULSE sync_adc_ovfl (.in_clk(adc_clk), .in(ADC_OVFL), .out_clk(cpu_clk), .out(rx_ovfl));
@@ -287,15 +329,15 @@ wire [31:0] wcnt;
 `ifdef USE_CPU_CTR
     reg cpu_ctr_ena;
     wire [31:0] cpu_ctr[1:0];
-    wire sclr = wrEvt && op[CPU_CTR_CLR];
+    wire sclr = wrEvt2 && op[CPU_CTR_CLR];
     
 	ip_acc_u32b cpu_ctr0 (.clk(cpu_clk), .sclr(sclr), .b(1), .q(cpu_ctr[0]));
 	ip_acc_u32b cpu_ctr1 (.clk(cpu_clk), .sclr(sclr), .b({{31{1'b0}}, cpu_ctr_ena}), .q(cpu_ctr[1]));
 
 	always @ (posedge cpu_clk)
 	begin
-		if (wrEvt && op[CPU_CTR_ENA]) cpu_ctr_ena <= 1;
-		if (wrEvt && op[CPU_CTR_DIS]) cpu_ctr_ena <= 0;
+		if (wrEvt2 && op[CPU_CTR_ENA]) cpu_ctr_ena <= 1;
+		if (wrEvt2 && op[CPU_CTR_DIS]) cpu_ctr_ena <= 0;
 	end
 `endif
 
@@ -332,7 +374,6 @@ wire [31:0] wcnt;
         .gps_rd 	(gps_rd),
         .gps_dout	(gps_dout),
         
-        .ticks_sel	(ticks_sel),
         .ticks_A	(ticks_A),
         
         .ser		(ser[0]),        

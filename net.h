@@ -20,6 +20,7 @@ Boston, MA  02110-1301, USA.
 #pragma once
 
 #include "types.h"
+#include "mongoose.h"
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -28,31 +29,35 @@ Boston, MA  02110-1301, USA.
 
 // dot to host (little-endian) conversion
 #define INET4_DTOH(a, b, c, d) \
-	(((a)&0xff)<<24) | (((b)&0xff)<<16) | (((c)&0xff)<<8) | ((d)&0xff)
+	( (((a)&0xff)<<24) | (((b)&0xff)<<16) | (((c)&0xff)<<8) | ((d)&0xff) )
 
 // dot to network (big endian) conversion
 #define INET4_DTON(a, b, c, d) \
-	(((d)&0xff)<<24) | (((c)&0xff)<<16) | (((b)&0xff)<<8) | ((a)&0xff)
+	( (((d)&0xff)<<24) | (((c)&0xff)<<16) | (((b)&0xff)<<8) | ((a)&0xff) )
 
 // network (big endian) to host (little endian) conversion
 #define INET4_NTOH(u32) \
 	FLIP32(u32)
 
+struct ip_lookup_t {
+    bool valid, backup;
+    int n_ips;
+	#define N_IPS 16
+	char *ip_list[N_IPS];
+};
+
 struct ddns_t {
 	bool valid, pub_valid;
 	int auto_nat;
 	u4_t serno;
+    u64_t dna;
 	char ip_pub[NET_ADDRSTRLEN];
 	int port, port_ext;
 	char mac[64];
 	
-	#define N_IPS 16
+    ip_lookup_t ips_kiwisdr_com, ips_sdr_hu;
 
-	char *ips_kiwisdr_com[N_IPS];
-	char *ips_sdr_hu[N_IPS];
-
-	int npub_ips;
-	char *pub_ips[N_IPS];
+	ip_lookup_t pub_ips;
 	bool pub_server;	// this kiwi is one of the public.kiwisdr.com servers
 	
 	bool lat_lon_valid;
@@ -97,12 +102,17 @@ struct ddns_t {
 extern ddns_t ddns;
 
 enum isLocal_t { IS_NOT_LOCAL, IS_LOCAL, NO_LOCAL_IF };
-isLocal_t isLocal_IP(conn_t *conn, bool print);
+isLocal_t isLocal_if_ip(conn_t *conn, char *ip_addr, const char *log_prefix);
 
 bool find_local_IPs();
-u4_t inet4_d2h(char *inet4_str);
+u4_t inet4_d2h(char *inet4_str, bool *error, u4_t *ap, u4_t *bp, u4_t *cp, u4_t *dp);
 bool is_inet4_map_6(u1_t *a);
 int inet_nm_bits(int family, void *netmask);
+bool isLocal_ip(char *ip);
 
-int DNS_lookup(const char *domain_name, char *r_ips[], int n_ips, const char *ip_backup);
-bool ip_match(const char *ip, char *ips[]);
+int DNS_lookup(const char *domain_name, ip_lookup_t *r_ips, int n_ips, const char *ip_backup);
+bool ip_match(const char *ip, ip_lookup_t *ips);
+
+char *ip_remote(struct mg_connection *mc);
+void check_if_forwarded(const char *id, struct mg_connection *mc, char *remote_ip);
+

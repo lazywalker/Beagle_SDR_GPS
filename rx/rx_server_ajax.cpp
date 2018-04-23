@@ -27,12 +27,10 @@ Boston, MA  02110-1301, USA.
 #include "web.h"
 #include "peri.h"
 #include "spi.h"
+#include "clk.h"
 #include "gps.h"
 #include "cfg.h"
-#include "dx.h"
 #include "coroutines.h"
-#include "data_pump.h"
-#include "ext_int.h"
 #include "net.h"
 
 #include <string.h>
@@ -63,12 +61,11 @@ char *rx_server_ajax(struct mg_connection *mc)
 
 	if (!st->uri) return NULL;
 
-	// these are okay to process while were down or updating
+	// these are okay to process while we're down or updating
 	if ((down || update_in_progress || backup_in_progress)
 		&& st->type != AJAX_VERSION
 		&& st->type != AJAX_STATUS
 		&& st->type != AJAX_DISCOVERY
-		&& st->type != AJAX_DUMP
 		)
 			return NULL;
 
@@ -160,20 +157,27 @@ char *rx_server_ajax(struct mg_connection *mc)
 		break;
 
 	// SECURITY:
-	//	OKAY, used by sdr.hu and Priyom Pavlova at the moment
+	//	OKAY, used by sdr.hu, kiwisdr.com and Priyom Pavlova at the moment
 	//	Returns '\n' delimited keyword=value pairs
 	case AJAX_STATUS: {
 	
+		// determine real client ip if proxied
+		char remote_ip[NET_ADDRSTRLEN];
+		check_if_forwarded(sdr_hu_debug? "/status" : NULL, mc, remote_ip);
+		
 		int sdr_hu_reg = (admcfg_bool("sdr_hu_register", NULL, CFG_OPTIONAL) == 1)? 1:0;
 		
-		// if sdr.hu registration is off then don't reply to sdr.hu, but reply to others
-		if (!sdr_hu_reg && ip_match(mc->remote_ip, ddns.ips_sdr_hu)) {
-			//printf("/status: sdr.hu reg disabled, not replying to sdr.hu (%s)\n", mc->remote_ip);
+		// If sdr.hu registration is off then don't reply to sdr.hu, but reply to others.
+		// But don't reply to anyone until ddns.ips_sdr_hu is valid.
+		if (!sdr_hu_reg && (!ddns.ips_sdr_hu.valid || ip_match(remote_ip, &ddns.ips_sdr_hu))) {
+			if (sdr_hu_debug)
+				printf("/status: sdr.hu reg disabled, not replying to sdr.hu (%s)\n", remote_ip);
 			return (char *) "NO-REPLY";
 		}
-		//printf("/status: replying to %s\n", mc->remote_ip);
+		if (sdr_hu_debug)
+			printf("/status: replying to %s\n", remote_ip);
 		
-		const char *s1, *s2, *s3, *s4, *s5, *s6;
+		const char *s1, *s3, *s4, *s5, *s6;
 		
 		// if location hasn't been changed from the default try using DDNS lat/log
 		// or, failing that, put us in Antarctica to be noticed
@@ -222,11 +226,6 @@ char *rx_server_ajax(struct mg_connection *mc)
 			}
 		}
 		
-		s2 = cfg_string("rx_device", NULL, CFG_OPTIONAL);
-		char *cp;
-		if ((cp = strstr((char *) s2, " on BeagleBone")) != NULL)
-			*cp = '\0';
-		
 		// if this Kiwi doesn't have any open access (no password required)
 		// prevent it from being listed on sdr.hu
 		const char *pwd_s = admcfg_string("user_password", NULL, CFG_REQUIRED);
@@ -234,15 +233,33 @@ char *rx_server_ajax(struct mg_connection *mc)
 		bool no_open_access = (*pwd_s != '\0' && chan_no_pwd == 0);
 		//printf("STATUS user_pwd=%d chan_no_pwd=%d no_open_access=%d\n", *pwd_s != '\0', chan_no_pwd, no_open_access);
 
+		// Advertise whether Kiwi can be publicly listed,
+		// and is available for use
+		const char *status;
+		if (! sdr_hu_reg)
+			// Make sure to always keep set to private when private
+			status = "private";
+		else if (down || update_in_progress || backup_in_progress)
+			status = "offline";
+		else
+			status = "active";
+
 		// the avatar file is in the in-memory store, so it's not going to be changing after server start
 		u4_t avatar_ctime = timer_server_build_unix_time();
 		
-		asprintf(&sb, "status=%s\nname=%s\nsdr_hw=%s v%d.%d%s\nop_email=%s\nbands=0-%.0f\nusers=%d\nusers_max=%d\navatar_ctime=%u\ngps=%s\nasl=%d\nloc=%s\nsw_version=%s%d.%d\nantenna=%s\n%suptime=%d\n",
-			sdr_hu_reg? "active" : "private",
-			name,
-			s2, version_maj, version_min, gps_default? " [default location set]" : "",
+		asprintf(&sb, "status=%s\nname=%s\nsdr_hw=KiwiSDR v%d.%d"
+			"%s%s ⁣\n"
+			"op_email=%s\nbands=%.0f-%.0f\nusers=%d\nusers_max=%d\n"
+			"avatar_ctime=%u\ngps=%s\nasl=%d\nloc=%s\nsw_version=%s%d.%d\nantenna=%s\n%suptime=%d\n",
+			status, name, version_maj, version_min,
+			// "nbsp;nbsp;" can't be used here because HTML can't be sent.
+			// So a Unicode "invisible separator" #x2063 surrounded by spaces gets the desired double spacing.
+			(clk.adc_gps_clk_corrections > 8)? " ⁣ 📡 GPS" : "",
+			have_ant_switch_ext?               " ⁣ 📶 ANT-SWITCH" : "",
+			//gps_default? " [default location set]" : "",
 			(s3 = cfg_string("admin_email", NULL, CFG_OPTIONAL)),
-			ui_srate, current_nusers,
+			(float) sdr_hu_lo_kHz * kHz, (float) sdr_hu_hi_kHz * kHz,
+			current_nusers,
 			(pwd_s != NULL && *pwd_s != '\0')? chan_no_pwd : RX_CHANS,
 			avatar_ctime, gps_loc,
 			cfg_int("rx_asl", NULL, CFG_OPTIONAL),
@@ -255,36 +272,12 @@ char *rx_server_ajax(struct mg_connection *mc)
 
 		if (name) free(name);
 		if (ddns_lat_lon) free(ddns_lat_lon);
-		cfg_string_free(s2);
 		cfg_string_free(s3);
 		cfg_string_free(s4);
 		cfg_string_free(s5);
 		cfg_string_free(s6);
 
 		//printf("STATUS REQUESTED from %s: <%s>\n", mc->remote_ip, sb);
-		break;
-	}
-
-	// SECURITY: FIXME: security through obscurity is weak
-	case AJAX_DUMP: {
-		printf("\n");
-		lprintf("DUMP REQUESTED from %s\n", mc->remote_ip);
-		if (strcmp(mc->query_string, "b3f5ca67159c3bfb6dc150bd1a2064f50b8367ee") != 0)
-			return NULL;
-		dump();
-		asprintf(&sb, "--- LOG DUMP ---\n");
-		log_save_t *ls = log_save_p;
-		int first = MIN(ls->idx, N_LOG_SAVE/2);
-		for (i = 0; i < first; i++) {
-			sb = kstr_cat(sb, (char *) ls->arr[i]);
-		}
-		if (ls->not_shown) {
-			asprintf(&sb2, "\n--- %d lines not shown ---\n\n", ls->not_shown);
-			sb = kstr_cat(sb, kstr_wrap(sb2));
-		}
-		for (; i < ls->idx; i++) {
-			sb = kstr_cat(sb, (char *) ls->arr[i]);
-		}
 		break;
 	}
 

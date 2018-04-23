@@ -9,8 +9,6 @@
 #ifndef DATATYPES_H
 #define DATATYPES_H
 
-#include "cuteSDR.h"
-
 #include <types.h>
 #include <iostream>
 #include <string.h>
@@ -69,6 +67,7 @@ struct tStereo24
  #define MFMOD(x,y) fmod(x,y)
  #define MATAN2(x,y) atan2(x,y)
  #define MASIN(x) asin(x)
+ #define MROUND(x) round(x)
 
  #define MFFTW_COMPLEX fftw_complex
  #define MFFTW_MALLOC fftw_malloc
@@ -90,6 +89,7 @@ struct tStereo24
  #define MFMOD(x,y) fmodf(x,y)
  #define MATAN2(x,y) atan2f(x,y)
  #define MASIN(x) asinf(x)
+ #define MROUND(x) roundf(x)
 
  #define MFFTW_COMPLEX fftwf_complex
  #define MFFTW_MALLOC fftwf_malloc

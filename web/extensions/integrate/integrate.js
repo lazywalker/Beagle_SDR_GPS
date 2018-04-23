@@ -32,8 +32,8 @@ function integrate_clear()
 	c.fillStyle = '#575757';
 	c.fillRect(0, 0, 256, 280);
 	
-	var left = w3_el_id('integrate-controls-left');
-	var right = w3_el_id('integrate-controls-right');
+	var left = w3_el('integrate-controls-left');
+	var right = w3_el('integrate-controls-right');
 
 	switch (integrate_preset) {
 	
@@ -211,16 +211,16 @@ function integrate_controls_setup()
 	integrate_preset = -1;
 	
    var data_html =
-      '<div id="id-integrate-time-display" style="top:50px; background-color:black; position:relative;"></div>' +
+      time_display_html('integrate') +
 
-      '<div id="id-integrate-data" style="left:150px; width:1024px; height:200px; background-color:mediumBlue; position:relative; display:none" title="integrate">' +
-   		'<canvas id="id-integrate-data-canvas" width="1024" height="200" style="position:absolute"></canvas>'+
-      '</div>';
+      w3_div('id-integrate-data|left:150px; width:1024px; height:200px; background-color:mediumBlue; position:relative;',
+   		'<canvas id="id-integrate-data-canvas" width="1024" height="200" style="position:absolute"></canvas>'
+      );
 
    var info_html =
-      '<div id="id-integrate-info" style="left:0px; height:280px; overflow:hidden; position:relative;" title="integrate">' +
-   		'<canvas id="id-integrate-info-canvas" width="256" height="280" style="position:absolute"></canvas>'+
-      '</div>';
+      w3_div('id-integrate-info|left:0px; height:280px; overflow:hidden; position:relative;',
+   		'<canvas id="id-integrate-info-canvas" width="256" height="280" style="position:absolute"></canvas>'
+      );
 
 	//jks debug
 	if (dbgUs) integrate.pre = 1;
@@ -241,7 +241,7 @@ function integrate_controls_setup()
 				w3_divs('w3-container', 'w3-tspace-8',
 					w3_div('w3-medium w3-text-aqua', '<b>Audio integration</b>'),
 					w3_input('Integrate time (secs)', 'integrate.itime', integrate.itime, 'integrate_itime_cb', '', 'w3-width-64'),
-					w3_select('Presets', 'select', 'integrate.pre', -1, pre_s, 'integrate_pre_select_cb'),
+					w3_select('', 'Presets', 'select', 'integrate.pre', -1, pre_s, 'integrate_pre_select_cb'),
 					w3_slider('WF max', 'integrate.maxdb', integrate.maxdb, -100, 20, 1, 'integrate_maxdb_cb'),
 					w3_slider('WF min', 'integrate.mindb', integrate.mindb, -190, -30, 1, 'integrate_mindb_cb'),
 					w3_button('', 'Clear', 'integrate_clear_cb')
@@ -250,22 +250,19 @@ function integrate_controls_setup()
 		);
 
 	ext_panel_show(controls_html, data_html, null);
-	time_display_setup('id-integrate-time-display');
+	time_display_setup('integrate');
 
-	integrate_data_canvas = w3_el_id('id-integrate-data-canvas');
+	integrate_data_canvas = w3_el('id-integrate-data-canvas');
 	integrate_data_canvas.ctx = integrate_data_canvas.getContext("2d");
 	integrate_data_canvas.im = integrate_data_canvas.ctx.createImageData(integ_w, 1);
 	integrate_data_canvas.addEventListener("mousedown", integrate_mousedown, false);
 
-	integrate_info_canvas = w3_el_id('id-integrate-info-canvas');
+	integrate_info_canvas = w3_el('id-integrate-info-canvas');
 	integrate_info_canvas.ctx = integrate_info_canvas.getContext("2d");
 
 	integrate_resize();
-	integrate_visible(1);
 
 	integrate_itime_cb('integrate.itime', integrate.itime);
-	integrate_maxdb_cb('integrate.maxdb', integrate.maxdb);
-	integrate_mindb_cb('integrate.mindb', integrate.mindb);
 	
 	ext_send('SET run=1');
 	integrate_clear();
@@ -275,26 +272,26 @@ function integrate_controls_setup()
 
 function integrate_resize()
 {
-	var el = w3_el_id('integrate-data');
-	var left = ((window.innerWidth - integ_w) / 2) - 50;
+	var el = w3_el('id-integrate-data');
+	var left = (window.innerWidth - integ_w - time_display_width()) / 2;
 	el.style.left = px(left);
 }
 
-var s = { KRAS:1, NOVO:2, KHAB:3, REVD:4, SEYD:5, MULT:6 };
+var alpha = { KRAS:1, NOVO:2, KHAB:3, REVD:4, SEYD:5, MULT:6 };
 var alpha_stations = [ 'Krasnodar 38\u00B0E', 'Novosibirsk 84\u00B0E', 'Khabarovsk 136\u00B0E', 'Revda 34\u00B0E', 'Seyda 62\u00B0E' ];
 var alpha_station_colors = [ 'yellow', 'red', 'lime', 'cyan', 'magenta' ];
 var alpha_freqs = [  ];
 
 var alpha_sched = {
-	0: [	'F1',		'F4/5',	'F2',		'F3/p'	],
-	1: [	11.9,		12.09,	12.65,	14.88		],		// F5 is really 12.04 and F3p is slightly different from F3
-	2: [	true,		false,	false,	false		],
-	3: [	s.NOVO,	0,			s.REVD,	s.KRAS	],
-	4: [	s.SEYD,	s.REVD,	s.NOVO,	s.KHAB	],
-	5: [	s.KRAS,	s.SEYD,	s.KHAB,	s.NOVO	],
-	6: [	s.KHAB,	0,			s.KRAS,	s.MULT	],
-	7: [	s.REVD,	0,			0,			s.SEYD	],
-	8: [	0,			0,			s.SEYD,	s.REVD	]
+	0: [	'F1',		   'F4/5',	   'F2',		   'F3/p'	   ],
+	1: [	11.9,		   12.09,	   12.65,	   14.88		   ],    // F5 is really 12.04 and F3p is slightly different from F3
+	2: [	true,		   false,	   false,	   false		   ],
+	3: [	alpha.NOVO,	0,			   alpha.REVD,	alpha.KRAS	],
+	4: [	alpha.SEYD,	alpha.REVD,	alpha.NOVO,	alpha.KHAB	],
+	5: [	alpha.KRAS,	alpha.SEYD,	alpha.KHAB,	alpha.NOVO	],
+	6: [	alpha.KHAB,	0,			   alpha.KRAS,	alpha.MULT	],
+	7: [	alpha.REVD,	0,			   0,			   alpha.SEYD	],
+	8: [	0,			   0,			   alpha.SEYD,	alpha.REVD	]
 };
 
 function integrate_alpha()
@@ -322,12 +319,12 @@ function integrate_alpha()
 			}
 			
 			var station = alpha_sched[tslot+2][freq];
-			if (station == s.MULT) {
-				c.fillStyle = alpha_station_colors[s.NOVO-1];
+			if (station == alpha.MULT) {
+				c.fillStyle = alpha_station_colors[alpha.NOVO-1];
 				c.fillRect(xo + xi*freq + (2-2-nbarw), y, nbarw, yh);
-				c.fillStyle = alpha_station_colors[s.REVD-1];
+				c.fillStyle = alpha_station_colors[alpha.REVD-1];
 				c.fillRect(xo + xi*freq + 2, y, nbarw, yh);
-				c.fillStyle = alpha_station_colors[s.SEYD-1];
+				c.fillStyle = alpha_station_colors[alpha.SEYD-1];
 				c.fillRect(xo + xi*freq + (2+nbarw+2), y, nbarw, yh);
 			} else
 			if (station) {
@@ -425,14 +422,14 @@ function integrate_pre_select_cb(path, idx)
 	}
 }
 
-function integrate_maxdb_cb(path, val)
+function integrate_maxdb_cb(path, val, complete, first)
 {
    integ_maxdb = parseFloat(val);
 	w3_num_cb(path, val);
 	w3_set_label('WF max '+ val +' dBFS', path);
 }
 
-function integrate_mindb_cb(path, val)
+function integrate_mindb_cb(path, val, complete, first)
 {
    integ_mindb = parseFloat(val);
 	w3_num_cb(path, val);
@@ -449,7 +446,6 @@ function integrate_clear_cb(path, val)
 function integrate_blur()
 {
 	//console.log('### integrate_blur');
-	integrate_visible(0);		
 	kiwi_clearInterval(integrate_update_interval);
 }
 
@@ -471,9 +467,4 @@ function integrate_config_html()
 			*/
 		)
 	);
-}
-
-function integrate_visible(v)
-{
-	visible_block('id-integrate-data', v);
 }

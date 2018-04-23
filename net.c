@@ -180,10 +180,9 @@ bool find_local_IPs()
 // Find all possible client IP addresses, IPv4 or IPv6, and compare against all our
 // server IPv4 or IPv6 addresses on the eth0 interface looking for a local network match.
 
-isLocal_t isLocal_IP(conn_t *conn, bool print)
+isLocal_t isLocal_if_ip(conn_t *conn, char *remote_ip_s, const char *log_prefix)
 {
 	int i, rc;
-	char *remote_ip_s = conn->remote_ip;
 	
 	struct addrinfo *res, *rp, hint;
 
@@ -203,10 +202,10 @@ isLocal_t isLocal_IP(conn_t *conn, bool print)
 	#endif
 
 	/*
-	if (print) printf("isLocal_IP: remote_ip_s=%s AF_INET=%d AF_INET6=%d IPPROTO_TCP=%d IPPROTO_UDP=%d\n",
-		remote_ip_s, AF_INET, AF_INET6, IPPROTO_TCP, IPPROTO_UDP);
-	if (print) printf("isLocal_IP: AI_V4MAPPED=0x%02x AI_ALL=0x%02x AI_ADDRCONFIG=0x%02x AI_NUMERICHOST=0x%02x AI_PASSIVE=0x%02x\n",
-		AI_V4MAPPED, AI_ALL, AI_ADDRCONFIG, AI_NUMERICHOST, AI_PASSIVE);
+	if (log_prefix) printf("%s isLocal_if_ip: remote_ip_s=%s AF_INET=%d AF_INET6=%d IPPROTO_TCP=%d IPPROTO_UDP=%d\n",
+		log_prefix, remote_ip_s, AF_INET, AF_INET6, IPPROTO_TCP, IPPROTO_UDP);
+	if (log_prefix) printf("%s isLocal_if_ip: AI_V4MAPPED=0x%02x AI_ALL=0x%02x AI_ADDRCONFIG=0x%02x AI_NUMERICHOST=0x%02x AI_PASSIVE=0x%02x\n",
+		log_prefix, AI_V4MAPPED, AI_ALL, AI_ADDRCONFIG, AI_NUMERICHOST, AI_PASSIVE);
 	*/
 	
 	memset(&hint, 0, sizeof(hint));
@@ -215,7 +214,7 @@ isLocal_t isLocal_IP(conn_t *conn, bool print)
 	
 	rc = getaddrinfo(remote_ip_s, NULL, &hint, &res);
 	if (rc != 0) {
-		if (print) clprintf(conn, "isLocal_IP getaddrinfo: %s FAILED %s\n", remote_ip_s, gai_strerror(rc));
+		if (log_prefix) clprintf(conn, "%s isLocal_if_ip: getaddrinfo %s FAILED %s\n", log_prefix, remote_ip_s, gai_strerror(rc));
 		return IS_NOT_LOCAL;
 	}
 	
@@ -238,8 +237,8 @@ isLocal_t isLocal_IP(conn_t *conn, bool print)
 		sa_p->sa_family = family;
 		int proto = rp->ai_protocol;
 
-		//if (print) printf("isLocal_IP: AI%d flg=0x%x fam=%d socktype=%d proto=%d addrlen=%d\n",
-		//	n, rp->ai_flags, family, rp->ai_socktype, rp->ai_protocol, rp->ai_addrlen);
+		//if (log_prefix) printf("%s isLocal_if_ip: AI%d flg=0x%x fam=%d socktype=%d proto=%d addrlen=%d\n",
+		//	log_prefix, n, rp->ai_flags, family, rp->ai_socktype, rp->ai_protocol, rp->ai_addrlen);
 
 		if (proto != IPPROTO_TCP)
 			continue;
@@ -266,12 +265,12 @@ isLocal_t isLocal_IP(conn_t *conn, bool print)
 		ip_client_s[0] = 0;
 		int rc = getnameinfo(sa_p, salen, ip_client_s, NET_ADDRSTRLEN, NULL, 0, NI_NUMERICHOST);
 		if (rc != 0) {
-			clprintf(conn, "getnameinfo() failed: %s\n", gai_strerror(rc));
+			if (log_prefix) clprintf(conn, "%s isLocal_if_ip: getnameinfo() failed: %s\n", log_prefix, gai_strerror(rc));
 			continue;
 		}
 		
-		if (print) cprintf(conn, "isLocal_IP: flg=0x%x fam=%d socktype=%d proto=%d addrlen=%d %s\n",
-			rp->ai_flags, family, rp->ai_socktype, rp->ai_protocol, rp->ai_addrlen, ip_client_s);
+		if (log_prefix) cprintf(conn, "%s isLocal_if_ip: flg=0x%x fam=%d socktype=%d proto=%d addrlen=%d %s\n",
+			log_prefix, rp->ai_flags, family, rp->ai_socktype, rp->ai_protocol, rp->ai_addrlen, ip_client_s);
 
 		// do local network check depending on type of client address: IPv4, IPv4-mapped IPv6, IPv6 or IPv6LL
 		u4_t ip_server, ip_client;
@@ -299,7 +298,7 @@ isLocal_t isLocal_IP(conn_t *conn, bool print)
 				netmask = ddns.netmask4_6;
 				have_server_local = true;
 			} else {
-				if (print) clprintf(conn, "isLocal_IP: IPv4 client, but no server IPv4/IPv4_6\n");
+				if (log_prefix) clprintf(conn, "%s isLocal_if_ip: IPv4 client, but no server IPv4/IPv4_6\n", log_prefix);
 				continue;
 			}
 
@@ -307,7 +306,7 @@ isLocal_t isLocal_IP(conn_t *conn, bool print)
 			ipv4_test = true;
 		} else
 
-		// detect IPv4-mapped IPv6 (::ffff/96 i.e. 0:0:0:0:0:ffff:a.b.c.d/96)
+		// detect IPv4-mapped IPv6 (::ffff:a.b.c.d/96)
 		if (family == AF_INET6) {
 			u1_t *a = (u1_t *) &sin6->sin6_addr;
 
@@ -328,7 +327,7 @@ isLocal_t isLocal_IP(conn_t *conn, bool print)
 					netmask = ddns.netmask4;
 				    have_server_local = true;
 				} else {
-					if (print) clprintf(conn, "isLocal_IP: IPv4_6 client, but no server IPv4 or IPv4_6\n");
+					if (log_prefix) clprintf(conn, "%s isLocal_if_ip: IPv4_6 client, but no server IPv4 or IPv4_6\n", log_prefix);
 					continue;
 				}
 					
@@ -353,7 +352,7 @@ isLocal_t isLocal_IP(conn_t *conn, bool print)
 					nm_bits = inet_nm_bits(AF_INET6, netmask6);
 				    have_server_local = true;
 				} else {
-					if (print) clprintf(conn, "isLocal_IP: IPv6 client, but no server IPv6\n");
+					if (log_prefix) clprintf(conn, "%s isLocal_if_ip: IPv6 client, but no server IPv6\n", log_prefix);
 					continue;
 				}
 			}
@@ -366,16 +365,16 @@ isLocal_t isLocal_IP(conn_t *conn, bool print)
 		bool local = false;
 		if (ipv4_test) {
 			local = ((ip_client & netmask) == (ip_server & netmask));
-			if (print) clprintf(conn, "isLocal_IP %s IPv4/4_6 remote_ip %s ip_client %s/0x%08x ip_server[%s] %s/0x%08x nm /%d 0x%08x\n",
-				local? "TRUE":"FALSE", remote_ip_s, ip_client_s, ip_client, ips_type, ip_server_s, ip_server, nm_bits, netmask);
+			if (log_prefix) clprintf(conn, "%s isLocal_if_ip: %s IPv4/4_6 remote_ip %s ip_client %s/0x%08x ip_server[%s] %s/0x%08x nm /%d 0x%08x\n",
+				log_prefix, local? "TRUE":"FALSE", remote_ip_s, ip_client_s, ip_client, ips_type, ip_server_s, ip_server, nm_bits, netmask);
 		} else {
 			for (i=0; i < 16; i++) {
 				local = ((ip_client6[i] & netmask6[i]) == (ip_server6[i] & netmask6[i]));
 				if (local == false)
 					break;
 			}
-			if (print) clprintf(conn, "isLocal_IP %s IPv6 remote_ip %s ip_client %s ip_server[%s] %s nm /%d\n",
-				local? "TRUE":"FALSE", remote_ip_s, ip_client_s, ips_type, ip_server_s, nm_bits);
+			if (log_prefix) clprintf(conn, "%s isLocal_if_ip: %s IPv6 remote_ip %s ip_client %s ip_server[%s] %s nm /%d\n",
+				log_prefix, local? "TRUE":"FALSE", remote_ip_s, ip_client_s, ips_type, ip_server_s, nm_bits);
 		}
 		
 		if (local) isLocal = IS_LOCAL;
@@ -384,7 +383,7 @@ isLocal_t isLocal_IP(conn_t *conn, bool print)
 	if (res != NULL) freeaddrinfo(res);
 
 	if (res == NULL || check == 0 ) {
-		if (print) clprintf(conn, "isLocal_IP getaddrinfo: %s NO CLIENT RESULTS?\n", remote_ip_s);
+		if (log_prefix) clprintf(conn, "%s isLocal_if_ip: getaddrinfo %s NO CLIENT RESULTS?\n", log_prefix, remote_ip_s);
 		return IS_NOT_LOCAL;
 	}
 	
@@ -392,19 +391,35 @@ isLocal_t isLocal_IP(conn_t *conn, bool print)
 	return isLocal;
 }
 
-u4_t inet4_d2h(char *inet4_str)
+u4_t inet4_d2h(char *inet4_str, bool *error, u4_t *ap, u4_t *bp, u4_t *cp, u4_t *dp)
 {
+    if (error != NULL) *error = false;
 	int n;
 	u4_t a, b, c, d;
+
+	if (inet4_str == NULL)
+	    goto err;
+	
 	n = sscanf(inet4_str, "%d.%d.%d.%d", &a, &b, &c, &d);
 	if (n != 4) {
 		n = sscanf(inet4_str, "::ffff:%d.%d.%d.%d", &a, &b, &c, &d); //IPv4-mapped address
 		if (n != 4)
-			return 0xffffffff; //IPv6
+			goto err;  // IPv6 or invalid
 	}
+	if (a > 255 || b > 255 || c > 255 || d > 255)
+	    goto err;
+
+    if (ap != NULL) *ap = a;
+    if (bp != NULL) *bp = b;
+    if (cp != NULL) *cp = c;
+    if (dp != NULL) *dp = d;
 	return INET4_DTOH(a, b, c, d);
+err:
+    if (error != NULL) *error = true;
+    return 0;
 }
 
+// ::ffff:a.b.c.d/96
 bool is_inet4_map_6(u1_t *a)
 {
 	int i;
@@ -455,11 +470,31 @@ int inet_nm_bits(int family, void *netmask)
 	return nm_bits;
 }
 
-bool ip_match(const char *ip, char *ips[])
+bool isLocal_ip(char *ip_str)
+{
+    bool error;
+    u4_t ip = inet4_d2h(ip_str, &error, NULL, NULL, NULL, NULL);
+    if (!error) {
+        // ipv4
+        if (
+            (ip >= INET4_DTOH(10,0,0,0) && ip <= INET4_DTOH(10,255,255,255)) ||
+            (ip >= INET4_DTOH(172,16,0,0) && ip <= INET4_DTOH(172,31,255,255)) ||
+            (ip >= INET4_DTOH(192,168,0,0) && ip <= INET4_DTOH(192,168,255,255)) )
+            return true;
+    } else {
+        // ipv6
+        if (strncasecmp(ip_str, "fd", 2) == 0)
+            return true;
+    }
+    
+    return false;
+}
+
+bool ip_match(const char *ip, ip_lookup_t *ips)
 {
     char *needle_ip;
 
-    for (int i = 0; (needle_ip = ips[i]) != NULL; i++) {
+    for (int i = 0; (needle_ip = ips->ip_list[i]) != NULL; i++) {
         bool match = (*needle_ip != '\0' && strstr(ip, needle_ip) != NULL);
         //printf("ipmatch: %s %d=\"%s\" %s\n", ip, i, needle_ip, match? "T":"F");
         if (match) {
@@ -472,13 +507,14 @@ bool ip_match(const char *ip, char *ips[])
     return false;
 }
 
-int DNS_lookup(const char *domain_name, char *r_ips[], int n_ips, const char *ip_backup)
+int DNS_lookup(const char *domain_name, ip_lookup_t *r_ips, int n_ips, const char *ip_backup)
 {
     int i, n, status;
     char *cmd_p;
+    char **ip_list = r_ips->ip_list;
 
     assert(n_ips <= N_IPS);
-    asprintf(&cmd_p, "dig +short +noedns +time=2 +tries=2 %s A %s AAAA", domain_name, domain_name);
+    asprintf(&cmd_p, "dig +short +noedns +time=3 +tries=3 %s A %s AAAA", domain_name, domain_name);
 	kstr_t *reply = non_blocking_cmd(cmd_p, &status);
 	
 	if (reply != NULL && status >= 0 && WEXITSTATUS(status) == 0) {
@@ -486,16 +522,18 @@ int DNS_lookup(const char *domain_name, char *r_ips[], int n_ips, const char *ip
 		n = kiwi_split(kstr_sp(reply), &r_buf, "\n", ips, n_ips-1);
 
         for (i = 0; i < n; i++) {
-            r_ips[i] = strndup(ips[i], NET_ADDRSTRLEN);
-            int slen = strlen(r_ips[i]);
-            if (r_ips[i][slen-1] == '\n') r_ips[i][slen-1] = '\0';    // remove trailing \n
-	        //printf("LOOKUP: \"%s\" %s\n", domain_name, r_ips[i]);
+            ip_list[i] = strndup(ips[i], NET_ADDRSTRLEN);
+            int slen = strlen(ip_list[i]);
+            if (ip_list[i][slen-1] == '\n') ip_list[i][slen-1] = '\0';    // remove trailing \n
+	        printf("LOOKUP: \"%s\" %s\n", domain_name, ip_list[i]);
         }
         
+        r_ips->valid = true;
 	} else {
 	    if (ip_backup != NULL) {
-            r_ips[0] = (char *) ip_backup;
+            ip_list[0] = (char *) ip_backup;
             n = 1;
+            r_ips->valid = r_ips->backup = true;
             printf("WARNING: lookup for \"%s\" failed, using backup IPv4 address %s\n", domain_name, ip_backup);
         } else {
             n = 0;
@@ -503,6 +541,39 @@ int DNS_lookup(const char *domain_name, char *r_ips[], int n_ips, const char *ip
 	}
 	free(cmd_p);
 	kstr_free(reply);
-    r_ips[n] = NULL;
+    ip_list[n] = NULL;
+    r_ips->n_ips = n;
 	return n;
+}
+
+char *ip_remote(struct mg_connection *mc)
+{
+    return kiwi_skip_over(mc->remote_ip, "::ffff:");
+}
+
+void check_if_forwarded(const char *id, struct mg_connection *mc, char *remote_ip)
+{
+    kiwi_strncpy(remote_ip, ip_remote(mc), NET_ADDRSTRLEN);
+    const char *x_real_ip = mg_get_header(mc, "X-Real-IP");
+    const char *x_forwarded_for = mg_get_header(mc, "X-Forwarded-For");
+
+    int i = 0;
+    char *ip_r = NULL;
+    if (x_real_ip != NULL) {
+        if (id != NULL)
+            printf("%s: %s X-Real-IP %s\n", id, remote_ip, x_real_ip);
+        i = sscanf(x_real_ip, "%" NET_ADDRSTRLEN_S "ms", &ip_r);
+    }
+    if (x_forwarded_for != NULL) {
+        if (id != NULL)
+            printf("%s: %s X-Forwarded-For %s\n", id, remote_ip, x_forwarded_for);
+        if (x_real_ip == NULL || i != 1) {
+            // take only client ip in case "X-Forwarded-For: client, proxy1, proxy2 ..."
+            i = sscanf(x_forwarded_for, "%" NET_ADDRSTRLEN_S "m[^, ]", &ip_r);
+        }
+    }
+
+    if (i == 1)
+        kiwi_strncpy(remote_ip, ip_r, NET_ADDRSTRLEN);
+    free(ip_r);
 }

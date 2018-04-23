@@ -72,12 +72,12 @@ void TaskCollect();
 #define CTF_FORK_CHILD		0x0080
 #define CTF_PRIO_INVERSION  0x0100
 #define CTF_NO_CHARGE		0x0200
+#define CTF_TNAME_FREE		0x0400
 
+int _CreateTask(funcP_t entry, const char *name, void *param, int priority, u4_t flags, int f_arg);
 #define CreateTask(f, param, priority)				_CreateTask(f, #f, param, priority, 0, 0)
-#define CreateTaskSP(f, s, param, priority)			_CreateTask(f, s, param, priority, 0, 0)
 #define CreateTaskF(f, param, priority, flags, fa)	_CreateTask(f, #f, param, priority, flags, fa)
 #define CreateTaskSF(f, s, param, priority, flags, fa)	_CreateTask(f, s, param, priority, flags, fa)
-int _CreateTask(funcP_t entry, const char *name, void *param, int priority, u4_t flags, int f_arg);
 
 // usec == 0 means sleep until someone does TaskWakeup() on us
 // usec > 0 is microseconds time in future (added to current time)
@@ -101,6 +101,8 @@ enum ipoll_from_e {
 	CALLED_FROM_SPI,
 	CALLED_FROM_FASTINTR,
 };
+
+extern bool itask_run;
 void TaskPollForInterrupt(ipoll_from_e from);
 #define TaskFastIntr(s)			if (GPIO_READ_BIT(GPIO0_15)) TaskPollForInterrupt(CALLED_FROM_FASTINTR);
 
@@ -123,9 +125,13 @@ bool TaskIsChild();
 #define	TDUMP_CLR_HIST  0x0400		// clear runtime histogram
 void TaskDump(u4_t flags);
 
-const char *_TaskName(const char *name);
-#define TaskName()		_TaskName(NULL)
-#define TaskNameS(name)	_TaskName(name)
+const char *_TaskName(const char *name, bool free_name);
+#define TaskName()          _TaskName(NULL, false)
+#define TaskNameS(name)     _TaskName(name, false)
+#define TaskNameSFree(name) _TaskName(name, true)
+
+char *Task_s(int id);
+char *Task_ls(int id);
 
 #define	TSTAT_MASK		0x00ff
 #define	TSTAT_NC		0
@@ -184,7 +190,7 @@ void _lock_init(lock_t *lock, const char *name);
 
 void lock_register(lock_t *lock);
 void lock_dump();
-void lock_check();
+bool lock_check();
 void lock_enter(lock_t *lock);
 void lock_leave(lock_t *lock);
 

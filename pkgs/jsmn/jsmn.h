@@ -25,11 +25,11 @@ typedef enum {
 	JSMN_PRIMITIVE = 4
 } jsmntype_t;
 
-#define JSMN_IS_ID(jt)		((jt)->type == JSMN_STRING && (jt)->size == 1)
-#define JSMN_IS_STRING(jt)	((jt)->type == JSMN_STRING && (jt)->size == 0)
-#define JSMN_IS_OBJECT(jt)	((jt)->type == JSMN_OBJECT)
-#define JSMN_IS_ARRAY(jt)	((jt)->type == JSMN_ARRAY)
-#define JSMN_IS_PRIMATIVE(jt)	((jt)->type == JSMN_PRIMITIVE)
+#define JSMN_IS_ID(jt)		    ((jt)->type == JSMN_STRING && (jt)->size == 1)
+#define JSMN_IS_STRING(jt)	    ((jt)->type == JSMN_STRING && (jt)->size == 0)
+#define JSMN_IS_OBJECT(jt)	    ((jt)->type == JSMN_OBJECT)
+#define JSMN_IS_ARRAY(jt)	    ((jt)->type == JSMN_ARRAY)
+#define JSMN_IS_PRIMITIVE(jt)	((jt)->type == JSMN_PRIMITIVE)
 
 enum jsmnerr {
 	/* Not enough tokens were provided */
@@ -77,7 +77,7 @@ void jsmn_init(jsmn_parser *parser);
  * a single JSON object.
  */
 int jsmn_parse(jsmn_parser *parser, const char *js, size_t len,
-		jsmntok_t *tokens, unsigned int num_tokens);
+		jsmntok_t *tokens, unsigned int num_tokens, int yield);
 
 #ifdef __cplusplus
 }

@@ -1,14 +1,15 @@
 VERSION_MAJ = 1
-VERSION_MIN = 109
+VERSION_MIN = 181
 
-DEBIAN_VER = 8.4
+REPO_NAME = Beagle_SDR_GPS
+DEBIAN_VER = 8.5
 
 # Caution: software update mechanism depends on format of first two lines in this file
 
 #
 # Makefile for KiwiSDR project
 #
-# Copyright (c) 2014-2016 John Seamons, ZL/KF6VO
+# Copyright (c) 2014-2017 John Seamons, ZL/KF6VO
 #
 
 #
@@ -57,6 +58,8 @@ DEBIAN_7 = $(shell test -f /sys/devices/platform/bone_capemgr/slots; echo $$?)
 # makes compiles fast on dev system
 ifeq ($(DEBIAN_DEVSYS),$(DEVSYS))
 	OPT = O0
+else
+#	OPT = O0
 endif
 
 OBJ_DIR = obj
@@ -79,9 +82,11 @@ PVT_EXTS = $(subst $(PVT_EXT_DIR)/,,$(wildcard $(PVT_EXT_DIR)/*))
 INT_EXTS = $(subst /,,$(subst extensions/,,$(wildcard $(INT_EXT_DIRS))))
 EXTS = $(INT_EXTS) $(PVT_EXTS)
 
+GPS = gps gps/ka9q-fec gps/GNSS-SDRLIB
+
 ifeq ($(OPT),O0)
 	DIRS = . pru $(PKGS) web extensions
-	DIRS += platform/$(PLATFORM) $(EXT_DIRS) rx rx/CuteSDR rx/csdr gps ui support arch arch/$(ARCH)
+	DIRS += platform/$(PLATFORM) $(EXT_DIRS) rx rx/CuteSDR rx/csdr rx/kiwi $(GPS) ui support arch arch/$(ARCH)
 else
 	DIRS = . pru $(PKGS) web extensions
 endif
@@ -89,7 +94,7 @@ endif
 ifeq ($(OPT),O0)
 	DIRS_O3 =
 else
-	DIRS_O3 = platform/$(PLATFORM) $(EXT_DIRS) rx rx/CuteSDR rx/csdr gps ui support arch arch/$(ARCH)
+	DIRS_O3 = platform/$(PLATFORM) $(EXT_DIRS) rx rx/CuteSDR rx/csdr rx/kiwi $(GPS) ui support arch arch/$(ARCH)
 endif
 
 VPATH = $(DIRS) $(DIRS_O3)
@@ -101,6 +106,7 @@ C = $(wildcard $(addsuffix /*.c,$(DIRS)))
 REMOVE = $(subst extensions/ext_init.c,,$(subst web/web.c,,$(subst web/edata_embed.c,,$(subst web/edata_always.c,,$(C)))))
 CFILES = $(REMOVE) $(wildcard $(addsuffix /*.cpp,$(DIRS)))
 CFILES_O3 = $(wildcard $(addsuffix /*.c,$(DIRS_O3))) $(wildcard $(addsuffix /*.cpp,$(DIRS_O3)))
+CFLAGS_UNSAFE_OPT = -fcx-limited-range -funsafe-math-optimizations
 
 ifeq ($(DEBIAN_DEVSYS),$(DEVSYS))
 # development machine, compile simulation version
@@ -113,7 +119,7 @@ ifeq ($(DEBIAN_DEVSYS),$(DEVSYS))
 else
 # host machine (BBB), only build the FPGA-using version
 #	CFLAGS = -mfloat-abi=softfp -mfpu=neon
-	CFLAGS = -mfpu=neon
+	CFLAGS =  -mfpu=neon -mtune=cortex-a8 -mcpu=cortex-a8 -mfloat-abi=hard
 #	CFLAGS += -O3
 	CFLAGS += -g -MD -DDEBUG -DHOST
 #	CFLAGS += -std=c++11 -DWEBRTC_POSIX
@@ -201,7 +207,7 @@ endif
 # FPGA embedded CPU
 $(GEN_ASM): kiwi.config $(wildcard e_cpu/asm/*)
 	(cd e_cpu; make)
-$(OUT_ASM): e_cpu/kiwi.asm
+$(OUT_ASM): $(wildcard e_cpu/*.asm)
 	(cd e_cpu; make no_gen)
 
 # noip2 DUC
@@ -339,6 +345,16 @@ $(OBJ_DIR)/%.o: %.cpp $(SRC_DEPS)
 	@expr `cat .comp_ctr` + 1 >.comp_ctr
 	$(POST_PROCESS_DEPS)
 
+$(OBJ_DIR_O3)/search.o: search.cpp $(SRC_DEPS)
+	g++ -O3 $(CFLAGS) $(CFLAGS_UNSAFE_OPT) $(FLAGS) -c -o $@ $<
+	@expr `cat .comp_ctr` + 1 >.comp_ctr
+	$(POST_PROCESS_DEPS)
+
+$(OBJ_DIR_O3)/simd.o: simd.cpp $(SRC_DEPS)
+	g++ -O3 $(CFLAGS) $(CFLAGS_UNSAFE_OPT) $(FLAGS) -c -o $@ $<
+	@expr `cat .comp_ctr` + 1 >.comp_ctr
+	$(POST_PROCESS_DEPS)
+
 $(OBJ_DIR_O3)/%.o: %.cpp $(SRC_DEPS)
 	g++ -O3 $(CFLAGS) $(FLAGS) -c -o $@ $<
 	@expr `cat .comp_ctr` + 1 >.comp_ctr
@@ -360,6 +376,8 @@ PRU  = cape-bone-$(DEV)-P-00A0
 
 DIR_CFG_SRC = unix_env/kiwi.config
 
+EXISTS_BASHRC_LOCAL = $(shell test -f ~root/.bashrc.local; echo $$?)
+
 CFG_KIWI = kiwi.json
 EXISTS_KIWI = $(shell test -f $(DIR_CFG)/$(CFG_KIWI); echo $$?)
 
@@ -371,6 +389,11 @@ EXISTS_CONFIG = $(shell test -f $(DIR_CFG)/$(CFG_CONFIG); echo $$?)
 
 CFG_DX = dx.json
 EXISTS_DX = $(shell test -f $(DIR_CFG)/$(CFG_DX); echo $$?)
+
+CFG_DX_MIN = dx.min.json
+EXISTS_DX_MIN = $(shell test -f $(DIR_CFG)/$(CFG_DX_MIN); echo $$?)
+
+ETC_HOSTS_HAS_KIWI = $(shell grep -qi kiwisdr /etc/hosts; echo $$?)
 
 # Only do a 'make install' on the target machine (not needed on the development machine).
 # For the Beagle this installs the device tree files in the right place and other misc stuff.
@@ -384,26 +407,35 @@ else
 #	cp pru/pru_realtime.bin kiwid_realtime.bin
 	cp KiwiSDR.bit KiwiSDRd.bit
 	cp pkgs/noip2/noip2 noip2
+	cp pkgs/frp/frpc frpc
 # don't strip symbol table while we're debugging daemon crashes
 #	install -D -s -o root -g root kiwid /usr/local/bin/kiwid
 	install -D -o root -g root kiwid /usr/local/bin/kiwid
 	install -D -o root -g root kiwid.aout /usr/local/bin/kiwid.aout
 #	install -D -o root -g root kiwid_realtime.bin /usr/local/bin/kiwid_realtime.bin
 	install -D -o root -g root KiwiSDR.bit /usr/local/bin/KiwiSDRd.bit
-	install -D -o root -g root noip2 /usr/local/bin/noip2
-	rm -f kiwid kiwid.aout kiwid_realtime.bin KiwiSDRd.bit noip2
 #
 	install -o root -g root unix_env/kiwid /etc/init.d
-	install -o root -g root unix_env/kiwid.service /etc/systemd/system
+	install -o root -g root -m 0644 unix_env/kiwid.service /etc/systemd/system
 	install -D -o root -g root -m 0644 unix_env/$(CAPE).dts /lib/firmware/$(CAPE).dts
 	install -D -o root -g root -m 0644 unix_env/$(SPI).dts /lib/firmware/$(SPI).dts
 	install -D -o root -g root -m 0644 unix_env/$(PRU).dts /lib/firmware/$(PRU).dts
 #
+	install -D -o root -g root noip2 /usr/local/bin/noip2
+#
+	install -D -o root -g root -m 0644 $(DIR_CFG_SRC)/frpc.template.ini $(DIR_CFG)/frpc.template.ini
+	install -D -o root -g root frpc /usr/local/bin/frpc
+	rm -f kiwid kiwid.aout kiwid_realtime.bin KiwiSDRd.bit noip2 frpc
+#
 	install -D -o root -g root -m 0644 unix_env/bashrc ~root/.bashrc
-	install -D -o root -g root -m 0644 unix_env/bashrc.local ~root/.bashrc.local
 	install -D -o root -g root -m 0644 unix_env/profile ~root/.profile
 
 # only install config files if they've never existed before
+ifeq ($(EXISTS_BASHRC_LOCAL),1)
+	@echo installing .bashrc.local
+	cp unix_env/bashrc.local ~root/.bashrc.local
+endif
+
 ifeq ($(EXISTS_KIWI),1)
 	@echo installing $(DIR_CFG)/$(CFG_KIWI)
 	@mkdir -p $(DIR_CFG)
@@ -423,14 +455,28 @@ ifeq ($(EXISTS_DX),1)
 	cp $(DIR_CFG_SRC)/dist.$(CFG_DX) $(DIR_CFG)/$(CFG_DX)
 endif
 
+ifeq ($(EXISTS_DX_MIN),1)
+	@echo installing $(DIR_CFG)/$(CFG_DX_MIN)
+	@mkdir -p $(DIR_CFG)
+	cp $(DIR_CFG_SRC)/dist.$(CFG_DX_MIN) $(DIR_CFG)/$(CFG_DX_MIN)
+endif
+
 ifeq ($(EXISTS_CONFIG),1)
 	@echo installing $(DIR_CFG)/$(CFG_CONFIG)
 	@mkdir -p $(DIR_CFG)
 	cp $(DIR_CFG_SRC)/dist.$(CFG_CONFIG) $(DIR_CFG)/$(CFG_CONFIG)
 endif
 
+ifeq ($(ETC_HOSTS_HAS_KIWI),1)
+	@echo appending kiwisdr to /etc/hosts
+	@echo '127.0.0.1       kiwisdr' >>/etc/hosts
+endif
+
 	systemctl enable kiwid.service
 	@echo $(C_CTR_DONE) >.comp_ctr
+
+# remove public keys leftover from development
+	@-sed -i -e '/.*jks-/d' /root/.ssh/authorized_keys
 endif
 
 ifeq ($(DEBIAN_DEVSYS),$(DEBIAN))
@@ -466,6 +512,9 @@ slog:
 syslog:
 	tail -n 1000 -f /var/log/syslog
 
+flog:
+	tail -n 100 -f /var/log/frpc.log
+
 LOCAL_IP = grep -vi 192.168.1
 LEAVING = grep -i leaving | grep -vi kf6vo | $(LOCAL_IP)
 users:
@@ -486,16 +535,24 @@ endif
 v ver version:
 	@echo "you are running version" $(VER)
 
+# workaround for sites having problems with git using https (even when curl with https works fine)
+OPT_GIT_USE_HTTPS = $(shell test -f /root/kiwi.config/opt.git_no_https; echo $$?)
+ifeq ($(OPT_GIT_USE_HTTPS),1)
+	PROTO = https
+else
+	PROTO = git
+endif
+
 # invoked by update process -- alter with care!
 git:
 	# remove local changes from development activities before the pull
 	git clean -fd
 	git checkout .
-	git pull -v
+	git pull -v $(PROTO)://github.com/jks-prv/Beagle_SDR_GPS.git
 
 update_check:
-	wget --no-check-certificate https://raw.githubusercontent.com/jks-prv/Beagle_SDR_GPS/master/Makefile -O Makefile.1
-	diff Makefile Makefile.1
+	curl --silent --ipv4 --show-error --connect-timeout 15 https://raw.githubusercontent.com/jks-prv/Beagle_SDR_GPS/master/Makefile -o Makefile.1
+	diff Makefile Makefile.1 | head
 
 force_update:
 	touch $(MAKEFILE_DEPS)
@@ -513,28 +570,30 @@ endif
 	hexdump -C /sys/bus/i2c/devices/0-0050/eeprom
 
 DIST = kiwi
-REPO_NAME = Beagle_SDR_GPS
 REPO = https://github.com/jks-prv/$(REPO_NAME).git
 V_DIR = ~/shared/shared
 
 # selectively transfer files to the target so everything isn't compiled each time
-EXCLUDE_RSYNC = ".git" "/obj" "/obj_O3" "/obj_keep" "*.dSYM" "*.bin" "*.aout" "e_cpu/a" "*.aout.h" "kiwi.gen.h" "verilog/kiwi.gen.vh" "web/edata*.c" ".comp_ctr" "extensions/ext_init.c" "pkgs/noip2/noip2"
+EXCLUDE_RSYNC = ".git" "/obj" "/obj_O3" "/obj_keep" "*.dSYM" "*.bin" "*.aout" "e_cpu/a" "*.aout.h" "kiwi.gen.h" \
+	"verilog/kiwi.gen.vh" "web/edata*.c" ".comp_ctr" "extensions/ext_init.c" "pkgs/noip2/noip2" "node_modules" "morse-pro-compiled.js"
 RSYNC_ARGS = -av --delete $(addprefix --exclude , $(EXCLUDE_RSYNC)) . root@$(HOST):~root/$(REPO_NAME)
 RSYNC = rsync $(RSYNC_ARGS)
 RSYNC_PORT = rsync -e "ssh -p $(PORT) -l root" $(RSYNC_ARGS)
 
 rsync_su:
 	sudo $(RSYNC)
+rsync_port:
+	sudo $(RSYNC_PORT)
 rsync_bit:
 	rsync -av $(V_DIR)/KiwiSDR.bit .
 	sudo $(RSYNC)
-rsync_port:
+rsync_bit_port:
 	rsync -av $(V_DIR)/KiwiSDR.bit .
 	sudo $(RSYNC_PORT)
 
 ifeq ($(DEBIAN_DEVSYS),$(DEVSYS))
 
-# generate the files need to build the Verilog code
+# generate the files needed to build the Verilog code
 verilog: $(GEN_VERILOG)
 	@echo verilog/ directory should now contain all necessary generated files:
 	@echo verilog/kiwi.gen.vh, verilog/rx/cic_*.vh
@@ -544,11 +603,12 @@ verilog: $(GEN_VERILOG)
 EXCLUDE_CV = ".DS_Store" "rx/cic_gen" "rx/*.dSYM"
 cv: $(GEN_VERILOG)
 	rsync -av --delete $(addprefix --exclude , $(EXCLUDE_CV)) verilog/ $(V_DIR)/KiwiSDR
-	rsync -av --delete $(addprefix --exclude , $(EXCLUDE_CV)) verilog.ip/ $(V_DIR)/KiwiSDR.ip
+	rsync -av --delete $(addprefix --exclude , $(EXCLUDE_CV)) verilog.Vivado.2014.4.ip/ $(V_DIR)/KiwiSDR.Vivado.2014.4.ip
+	rsync -av --delete $(addprefix --exclude , $(EXCLUDE_CV)) verilog.Vivado.2017.4.ip/ $(V_DIR)/KiwiSDR.Vivado.2017.4.ip
 
 cv2:
 	@echo "you probably want to use \"make cv\" here"
-	
+
 endif
 
 clean:

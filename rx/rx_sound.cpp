@@ -41,6 +41,10 @@ Boston, MA  02110-1301, USA.
 #include "mongoose.h"
 #include "ima_adpcm.h"
 #include "ext_int.h"
+#include "rx.h"
+#include "fastfir.h"
+#include "noiseproc.h"
+#include "lms.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -54,10 +58,19 @@ Boston, MA  02110-1301, USA.
 //#define TR_SND_CMDS
 #define SM_SND_DEBUG	false
 
-snd_t snd_inst[RX_CHANS];
+// 1st estimate of processing delay
+const double gps_delay    = 28926.838e-6;
+const double gps_week_sec = 7*24*3600.0;
 
-const char *mode_s[N_MODE] = { "am", "amn", "usb", "lsb", "cw", "cwn", "nbfm", "iq" };
-const char *modu_s[N_MODE] = { "AM", "AMN", "USB", "LSB", "CW", "CWN", "NBFM", "IQ" };
+struct gps_timestamp_t {
+	int    fir_pos;      // current position in FIR filter
+	double gpssec;       // current gps timestamp
+	double last_gpssec;  // last gps timestamp
+} ;
+
+gps_timestamp_t gps_ts[RX_CHANS];
+
+snd_t snd_inst[RX_CHANS];
 
 float g_genfreq, g_genampl, g_mixfreq;
 
@@ -83,8 +96,8 @@ void c2s_sound_setup(void *param)
 	conn_t *conn = (conn_t *) param;
 	double frate = ext_update_get_sample_rateHz(-1);
 
-	send_msg(conn, SM_SND_DEBUG, "MSG center_freq=%d bandwidth=%d", (int) ui_srate/2, (int) ui_srate);
-	send_msg(conn, SM_SND_DEBUG, "MSG audio_rate=%d sample_rate=%.3f", SND_RATE, frate);
+	send_msg(conn, SM_SND_DEBUG, "MSG center_freq=%d bandwidth=%d adc_clk_nom=%.0f", (int) ui_srate/2, (int) ui_srate, ADC_CLOCK_NOM);
+	send_msg(conn, SM_SND_DEBUG, "MSG audio_init=%d audio_rate=%d sample_rate=%.3f", conn->isLocal, SND_RATE, frate);
 }
 
 void c2s_sound(void *param)
@@ -99,7 +112,10 @@ void c2s_sound(void *param)
 	const char *s;
 	
 	double freq=-1, _freq, gen=-1, _gen, locut=0, _locut, hicut=0, _hicut, mix;
-	int mode=-1, _mode, autonotch=-1, _autonotch, genattn=0, _genattn, mute;
+	int mode=-1, _mode, genattn=0, _genattn, mute;
+	int noise_blanker=0, noise_threshold=0, nb_click=0, last_noise_pulse=0;
+	int lms_denoise=0, lms_autonotch=0, lms_de_delay=0, lms_an_delay=0;
+	float lms_de_beta=0, lms_an_beta=0, lms_de_decay=0, lms_an_decay=0;
 	double z1 = 0;
 
 	double frate = ext_update_get_sample_rateHz(rx_chan);      // FIXME: do this in loop to get incremental changes
@@ -107,7 +123,7 @@ void c2s_sound(void *param)
 	#define ATTACK_TIMECONST .01	// attack time in seconds
 	float sMeterAlpha = 1.0 - expf(-1.0/((float) frate * ATTACK_TIMECONST));
 	float sMeterAvg_dB = 0;
-	bool compression = true;
+	int compression = 1;
 	
 	snd->seq = 0;
 	
@@ -138,10 +154,10 @@ void c2s_sound(void *param)
 	
 	int tr_cmds = 0;
 	u4_t cmd_recv = 0;
-	bool cmd_recv_ok = false, change_LPF = false;
+	bool cmd_recv_ok = false, change_LPF = false, change_freq_mode = false;
 	
 	memset(&rx->adpcm_snd, 0, sizeof(ima_adpcm_state_t));
-
+	
 	//clprintf(conn, "SND INIT conn: %p mc: %p %s:%d %s\n",
 	//	conn, conn->mc, conn->remote_ip, conn->remote_port, conn->mc->uri);
 	
@@ -203,6 +219,7 @@ void c2s_sound(void *param)
 					if (do_sdr) spi_set(CmdSetRXFreq, rx_chan, i_phase);
 					cmd_recv |= CMD_FREQ;
 					new_freq = true;
+					change_freq_mode = true;
 				}
 				
 				_mode = kiwi_str2enum(mode_m, mode_s, ARRAY_LEN(mode_s));
@@ -211,13 +228,24 @@ void c2s_sound(void *param)
 				if (_mode == NOT_FOUND) {
 					clprintf(conn, "SND bad mode <%s>\n", mode_m);
 					_mode = MODE_AM;
+					change_freq_mode = true;
 				}
 				
 				bool new_nbfm = false;
 				if (mode != _mode) {
+
+                    // when switching out of IQ mode reset AGC, compression state
+				    if (mode == MODE_IQ && _mode != MODE_IQ && (cmd_recv & CMD_AGC)) {
+					    //cprintf(conn, "SND out IQ mode -> reset AGC, compression\n");
+                        m_Agc[rx_chan].SetParameters(agc, hang, thresh, manGain, slope, decay, frate);
+	                    memset(&rx->adpcm_snd, 0, sizeof(ima_adpcm_state_t));
+                    }
+
 					mode = _mode;
 					if (mode == MODE_NBFM)
 						new_nbfm = true;
+					change_freq_mode = true;
+					//cprintf(conn, "SND mode %s\n", mode_m);
 				}
 
 				if (mode == MODE_NBFM && (new_freq || new_nbfm)) {
@@ -239,7 +267,7 @@ void c2s_sound(void *param)
 					//cprintf(conn, "SND LOcut %.0f HIcut %.0f BW %.0f/%.0f\n", locut, hicut, bw, frate/2);
 					
 					#define CW_OFFSET 0		// fixme: how is cw offset handled exactly?
-					m_FastFIR[rx_chan].SetupParameters(locut, hicut, CW_OFFSET, frate);
+					m_PassbandFIR[rx_chan].SetupParameters(locut, hicut, CW_OFFSET, frate);
 					conn->half_bw = bw;
 					
 					// post AM detector filter
@@ -262,6 +290,19 @@ void c2s_sound(void *param)
 			}
 			free(mode_m);
 			
+			int _comp;
+			n = sscanf(cmd, "SET compression=%d", &_comp);
+			if (n == 1) {
+				//printf("compression %d\n", _comp);
+				if (_comp && (compression != _comp)) {      // when enabling compression reset AGC, compression state
+				    if (cmd_recv & CMD_AGC)
+                        m_Agc[rx_chan].SetParameters(agc, hang, thresh, manGain, slope, decay, frate);
+                    memset(&rx->adpcm_snd, 0, sizeof(ima_adpcm_state_t));
+				}
+                compression = _comp;
+				continue;
+			}
+
 			n = sscanf(cmd, "SET gen=%lf mix=%lf", &_gen, &mix);
 			if (n == 2) {
 				//printf("MIX %f %d\n", mix, (int) mix);
@@ -315,17 +356,84 @@ void c2s_sound(void *param)
 				continue;
 			}
 
-			n = sscanf(cmd, "SET autonotch=%d", &_autonotch);
+			n = sscanf(cmd, "SET lms_denoise=%d", &lms_denoise);
 			if (n == 1) {
-				autonotch = _autonotch;		// fixme
-				wf_olap = autonotch? 8:1;
-				//printf("wf_olap=%d\n", wf_olap);
+				//printf("lms_denoise %d\n", lms_denoise);
+			    if (lms_denoise)
+	                m_LMS_denoise[rx_chan].Initialize(LMS_DENOISE_QRN, lms_de_delay, lms_de_beta, lms_de_decay);
+				continue;
+			}
+
+			n = sscanf(cmd, "SET lms.de_delay=%d", &lms_de_delay);
+			if (n == 1) {
+				//printf("lms_de_delay %d\n", lms_de_delay);
+	            m_LMS_denoise[rx_chan].Initialize(LMS_DENOISE_QRN, lms_de_delay, lms_de_beta, lms_de_decay);
+				continue;
+			}
+
+			n = sscanf(cmd, "SET lms.de_beta=%f", &lms_de_beta);
+			if (n == 1) {
+				//printf("lms_de_beta %.3f\n", lms_de_beta);
+	            m_LMS_denoise[rx_chan].Initialize(LMS_DENOISE_QRN, lms_de_delay, lms_de_beta, lms_de_decay);
+				continue;
+			}
+
+			n = sscanf(cmd, "SET lms.de_decay=%f", &lms_de_decay);
+			if (n == 1) {
+				//printf("lms_de_decay %.3f\n", lms_de_decay);
+	            m_LMS_denoise[rx_chan].Initialize(LMS_DENOISE_QRN, lms_de_delay, lms_de_beta, lms_de_decay);
+				continue;
+			}
+
+			n = sscanf(cmd, "SET lms_autonotch=%d", &lms_autonotch);
+			if (n == 1) {
+				//printf("lms_autonotch %d\n", lms_autonotch);
+			    if (lms_autonotch)
+	                m_LMS_autonotch[rx_chan].Initialize(LMS_AUTONOTCH_QRM, lms_an_delay, lms_an_beta, lms_an_decay);
+				continue;
+			}
+
+			n = sscanf(cmd, "SET lms.an_delay=%d", &lms_an_delay);
+			if (n == 1) {
+				//printf("lms_an_delay %d\n", lms_an_delay);
+	            m_LMS_autonotch[rx_chan].Initialize(LMS_AUTONOTCH_QRM, lms_an_delay, lms_an_beta, lms_an_decay);
+				continue;
+			}
+
+			n = sscanf(cmd, "SET lms.an_beta=%f", &lms_an_beta);
+			if (n == 1) {
+				//printf("lms_an_beta %.3f\n", lms_an_beta);
+	            m_LMS_autonotch[rx_chan].Initialize(LMS_AUTONOTCH_QRM, lms_an_delay, lms_an_beta, lms_an_decay);
+				continue;
+			}
+
+			n = sscanf(cmd, "SET lms.an_decay=%f", &lms_an_decay);
+			if (n == 1) {
+				//printf("lms_an_decay %.3f\n", lms_an_decay);
+	            m_LMS_autonotch[rx_chan].Initialize(LMS_AUTONOTCH_QRM, lms_an_delay, lms_an_beta, lms_an_decay);
 				continue;
 			}
 
 			n = sscanf(cmd, "SET mute=%d", &mute);
 			if (n == 1) {
 				//printf("mute %d\n", mute);
+				// FIXME: stop audio stream to save bandwidth?
+				continue;
+			}
+
+            int nb, th;
+			n = sscanf(cmd, "SET nb=%d th=%d", &nb, &th);
+			if (n == 2) {
+			    if (nb < 0) {
+			        nb_click = (nb == -1)? 1:0;
+			        continue;
+			    }
+			    noise_blanker = nb;
+			    noise_threshold = th;
+
+				if (noise_blanker) {
+                    m_NoiseProc[rx_chan][NB_SND].SetupBlanker("SND", (float) noise_threshold, (float) noise_blanker, frate);
+				}
 				continue;
 			}
 
@@ -393,7 +501,7 @@ void c2s_sound(void *param)
 		// no keep-alive seen for a while or the bug where an initial cmds are not received and the connection hangs open
 		// and locks-up a receiver channel
 		conn->keep_alive = timer_sec() - ka_time;
-		bool keepalive_expired = (conn->keep_alive > KEEPALIVE_SEC);
+		bool keepalive_expired = (!conn->internal_connection && conn->keep_alive > KEEPALIVE_SEC);
 		bool connection_hang = (conn->keepalive_count > 4 && cmd_recv != CMD_ALL);
 		if (keepalive_expired || connection_hang || conn->inactivity_timeout || conn->kick) {
 			//if (keepalive_expired) clprintf(conn, "SND KEEP-ALIVE EXPIRED\n");
@@ -406,7 +514,7 @@ void c2s_sound(void *param)
 			if (cwf && cwf->type == STREAM_WATERFALL && cwf->rx_channel == conn->rx_channel) {
 				cwf->stop_data = TRUE;
 				
-				// only in sound task: disable data pump channel
+				// do this only in sound task: disable data pump channel
 				rx_enable(rx_chan, RX_CHAN_DISABLE);	// W/F will free rx_chan[]
 			} else {
 				rx_enable(rx_chan, RX_CHAN_FREE);		// there is no W/F, so free rx_chan[] now
@@ -429,22 +537,29 @@ void c2s_sound(void *param)
 			cmd_recv_ok = true;
 		}
 		
-		u1_t *bp_real, *bp_iq;
-		snd_pkt_t out_pkt;
+		snd_pkt_real_t out_pkt_real;
+		snd_pkt_iq_t   out_pkt_iq;
+
+		strncpy(out_pkt_real.h.id, "SND", 3);
+		strncpy(out_pkt_iq.h.id,   "SND", 3);
 		
-		#define	SND_FLAG_SMETER		0x00
-		#define	SND_FLAG_LPF		0x10
-		#define	SND_FLAG_ADC_OVFL	0x20
+		#define	SND_FLAG_LPF		0x01
+		#define	SND_FLAG_ADC_OVFL	0x02
+		#define	SND_FLAG_NEW_FREQ	0x04
+		#define	SND_FLAG_MODE_IQ	0x08
+		#define SND_FLAG_COMPRESSED 0x10
+
+		u1_t *bp_real = &out_pkt_real.buf[0];
+		u1_t *bp_iq   = &out_pkt_iq.buf[0];
+		u1_t *flags   = (mode == MODE_IQ ? &out_pkt_iq.h.flags : &out_pkt_real.h.flags);
+		u4_t *seq     = (mode == MODE_IQ ? &out_pkt_iq.h.seq   : &out_pkt_real.h.seq);
+		char *smeter  = (mode == MODE_IQ ? out_pkt_iq.h.smeter : out_pkt_real.h.smeter);
 		
-		bp_real = &out_pkt.buf_real[0];
-		bp_iq = &out_pkt.buf_iq[0];
 		u2_t bc = 0;
-		strncpy(out_pkt.h.id, "SND ", 4);
 
 		ext_receive_S_meter_t receive_S_meter = ext_users[rx_chan].receive_S_meter;
 
-		while (bc < 1024) {		// fixme: larger?
-
+        while (bc < 1024) {		// fixme: larger?
 			while (rx->wr_pos == rx->rd_pos) {
 				evSnd(EC_EVENT, EV_SND, -1, "rx_snd", "sleeping");
 				TaskSleepReason("check pointers");
@@ -454,18 +569,30 @@ void c2s_sound(void *param)
 
 			TYPECPX *i_samps = rx->in_samps[rx->rd_pos];
 
-			#if 0
-                u2_t *tp = rx->ticks[rx->rd_pos];
-                static u64_t last_ticks;
-                static u4_t tick_seq;
-                u64_t ticks = ((u64_t) tp[2]<<32) | (tp[1]<<16) | tp[0];
-                u64_t diff_ticks = time_diff48(ticks, last_ticks);
-                if ((tick_seq % 32) == 0) printf("ticks %012llx %012llx | %012llx %012llx #%d GPST %f off %.1f\n",
-                    ticks, diff_ticks,
-                    time_diff48(ticks, clk.ticks), clk.ticks, clk.adc_clk_corrections, clk.gps_secs, clk.offset);
-                last_ticks = ticks;
-                tick_seq++;
-			#endif
+			// check 48-bit ticks counter timestamp in audio IQ stream
+			const u64_t ticks   = rx->ticks[rx->rd_pos];
+			const u64_t dt      = time_diff48(ticks, clk.ticks);  // time difference to last GPS solution
+#if 0
+			static u64_t last_ticks = 0;
+			static u4_t  tick_seq   = 0;
+			const u64_t diff_ticks = time_diff48(ticks, last_ticks); // time difference to last buffer
+			
+			if ((tick_seq % 32) == 0) printf("ticks %08x|%08x %08x|%08x // %08x|%08x %08x|%08x #%d,%d GPST %f\n",
+											 PRINTF_U64_ARG(ticks), PRINTF_U64_ARG(diff_ticks),
+											 PRINTF_U64_ARG(dt), PRINTF_U64_ARG(clk.ticks),
+											 clk.adc_gps_clk_corrections, clk.adc_clk_corrections, clk.gps_secs);
+			if (diff_ticks != RX1_DECIM*RX2_DECIM*NRX_SAMPS)
+				printf("ticks %08x|%08x %08x|%08x // %08x|%08x %08x|%08x #%d,%d GPST %f (%d) *****\n",
+					   PRINTF_U64_ARG(ticks), PRINTF_U64_ARG(diff_ticks),
+					   PRINTF_U64_ARG(dt), PRINTF_U64_ARG(clk.ticks),
+					   clk.adc_gps_clk_corrections, clk.adc_clk_corrections, clk.gps_secs,
+					   tick_seq);
+			last_ticks = ticks;
+			tick_seq++;
+#endif
+			gps_ts[rx_chan].gpssec = fmod(gps_week_sec + clk.gps_secs + dt/clk.adc_clock_base - gps_delay, gps_week_sec);
+			out_pkt_iq.h.last_gps_solution = (clk.ticks == 0 ? 255 : u1_t(std::min(254.0, dt/clk.adc_clock_base)));
+			out_pkt_iq.h.dummy = 0;
 
 		    #ifdef SND_SEQ_CHECK
 		        if (rx->in_seq[rx->rd_pos] != snd->snd_seq) {
@@ -484,16 +611,49 @@ void c2s_sound(void *param)
 			TYPECPX *f_samps = &rx->iq_samples[rx->iq_wr_pos][0];
 			rx->iq_seqnum[rx->iq_wr_pos] = rx->iq_seq;
 			rx->iq_seq++;
-			int ns_in = NRX_SAMPS, ns_out;
+			const int ns_in = NRX_SAMPS;
+			
+            if (nb_click) {
+                u4_t now = timer_sec();
+                if (now != last_noise_pulse) {
+                    last_noise_pulse = now;
+                    i_samps[50].re = K_AMPMAX - 16;
+                }
+            }
 
-			ns_out = m_FastFIR[rx_chan].ProcessData(rx_chan, ns_in, i_samps, f_samps);
+			if (noise_blanker) {
+                m_NoiseProc[rx_chan][NB_SND].ProcessBlanker(ns_in, i_samps, i_samps);
+            }
 
-			// FIR has a pipeline delay: ns_in|ns_out = 85|512 85|0 85|0 85|0 85|0 85|0 85|512 ... (85*6 = 510)
-			//real_printf("%d|%d ", ns_in, ns_out); fflush(stdout);
+			gps_ts[rx_chan].fir_pos += ns_in;
+			const int ns_out = m_PassbandFIR[rx_chan].ProcessData(rx_chan, ns_in, i_samps, f_samps);
+			gps_ts[rx_chan].fir_pos -= ns_out;
+
+			// FIR has a pipeline delay:
+			//   gpssec=         t_0    t_1  t_2  t_3  t_4  t_5  t_6  t_7
+			//                    v      v    v    v    v    v    v    v
+			//   ns_in|ns_out = 84|512 84|0 84|0 84|0 84|0 84|0 84|0 84|512 ... (84*6 = 504)
+			//                    ^                                    ^
+			//                   (a) fir_pos=0                        (b) fir_pos=76
+			// GPS start times of 512 sample buffers:
+			//  * @a : t_0 +  84    (no samples in the FIR buffer)
+			//  * @b : t_7 +  84-76 (there are already 76 samples in the FIR buffer)
+			// real_printf("ns_i,out=%2d|%3d gps_ts.fir_pos=%d\n", ns_in, ns_out, gps_ts[rx_chan].fir_pos); fflush(stdout);
 			if (!ns_out) {
 				continue;
 			}
-
+			// correct GPS timestamp for offset in the FIR filter
+			//  (1) delay in FIR filter
+			int sample_filter_delays = NRX_SAMPS - gps_ts[rx_chan].fir_pos;
+			//  (2) delay in AGC (if on)
+			if (agc)
+				sample_filter_delays -= m_Agc[rx_chan].GetDelaySamples();
+			gps_ts[rx_chan].gpssec = fmod(gps_week_sec + gps_ts[rx_chan].gpssec + RX1_DECIM*RX2_DECIM * sample_filter_delays / clk.adc_clock_base,
+										  gps_week_sec);
+			out_pkt_iq.h.gpssec  = u4_t(gps_ts[rx_chan].last_gpssec);
+			out_pkt_iq.h.gpsnsec = u4_t(1e9*(gps_ts[rx_chan].last_gpssec-out_pkt_iq.h.gpssec));
+			// real_printf("__GPS__ gpssec=%.9f diff=%.9f\n",  gps_ts[rx_chan].gpssec, gps_ts[rx_chan].gpssec-gps_ts[rx_chan].last_gpssec);
+			gps_ts[rx_chan].last_gpssec = gps_ts[rx_chan].gpssec;
 			rx->iq_wr_pos = (rx->iq_wr_pos+1) & (N_DPBUF-1);
 
 			TYPECPX *f_sa = f_samps;
@@ -511,11 +671,13 @@ void c2s_sound(void *param)
 				sMeterAvg_dB = (1.0 - sMeterAlpha)*sMeterAvg_dB + sMeterAlpha*pwr_dB;
 				f_sa++;
 			
+			    // forward S-meter samples if requested
 				// S-meter value in audio packet is sent less often than if we send it from here
 				if (receive_S_meter != NULL && (j == 0 || j == ns_out/2))
 					receive_S_meter(rx_chan, sMeterAvg_dB + S_meter_cal);
 			}
 			
+			// forward IQ samples if requested
 			if (ext_users[rx_chan].receive_iq != NULL && mode != MODE_NBFM)
 				ext_users[rx_chan].receive_iq(rx_chan, 0, ns_out, f_samps);
 			
@@ -552,6 +714,10 @@ void c2s_sound(void *param)
 				// clean up residual noise left by detector
 				// the non-FFT FIR has no pipeline delay issues
 				m_AM_FIR[rx_chan].ProcessFilter(ns_out, d_samps, r_samps);
+
+                // noise processors
+				if (lms_denoise) m_LMS_denoise[rx_chan].ProcessFilter(ns_out, r_samps, r_samps);
+				if (lms_autonotch) m_LMS_autonotch[rx_chan].ProcessFilter(ns_out, r_samps, r_samps);
 			} else
 			
 			if (mode == MODE_NBFM) {
@@ -586,8 +752,12 @@ void c2s_sound(void *param)
 				}
 			} else
 			
-			if (mode != MODE_IQ) {      // sideband modes
+			if (mode != MODE_IQ) {      // sideband modes: MODE_LSB, MODE_USB, MODE_CW, MODE_CWN
 				m_Agc[rx_chan].ProcessData(ns_out, f_samps, r_samps);
+
+                // noise processors
+				if (lms_denoise) m_LMS_denoise[rx_chan].ProcessFilter(ns_out, r_samps, r_samps);
+				if (lms_autonotch) m_LMS_autonotch[rx_chan].ProcessFilter(ns_out, r_samps, r_samps);
 			}
 
 			if (mode == MODE_IQ) {
@@ -605,6 +775,7 @@ void c2s_sound(void *param)
 		    } else {
                 rx->real_wr_pos = (rx->real_wr_pos+1) & (N_DPBUF-1);
     
+			    // forward real samples if requested
                 if (ext_users[rx_chan].receive_real != NULL)
                     ext_users[rx_chan].receive_real(rx_chan, 0, ns_out, r_samps);
                 
@@ -635,9 +806,8 @@ void c2s_sound(void *param)
                     printf("SND%d: %d %d %.3fs\n", rx_chan, SND_RATE, nbuf, (float) (now - last_time[rx_chan]) / 1e3);
                     
                     #if 0
-                        static SPI_MISO status;
-                        spi_get(CmdGetStatus, &status, 2);
-                        if (status.word[0] & STAT_OVFL) {
+		                stat_reg_t stat = stat_get();
+                        if (stat.word & STAT_OVFL) {
                             //printf("OVERFLOW ==============================================");
                             spi_set(CmdClrRXOvfl);
                         }
@@ -647,7 +817,7 @@ void c2s_sound(void *param)
                     last_time[rx_chan] = now;
                 }
 			#endif
-		}
+		} // bc < 1024
 
 		NextTask("s2c begin");
 				
@@ -657,34 +827,47 @@ void c2s_sound(void *param)
 		if (sMeter_dBm < -127.0) sMeter_dBm = -127.0; else
 		if (sMeter_dBm >    3.4) sMeter_dBm =    3.4;
 		u2_t sMeter = (u2_t) ((sMeter_dBm + SMETER_BIAS) * 10);
-		assert(sMeter <= 0x0fff);
-		out_pkt.h.smeter[0] = SND_FLAG_SMETER | ((sMeter >> 8) & 0xf);
-		out_pkt.h.smeter[1] = sMeter & 0xff;
-		
-		if (rx_adc_ovfl) out_pkt.h.smeter[0] |= SND_FLAG_ADC_OVFL;
+		smeter[0] = (sMeter >> 8) & 0xff;
+		smeter[1] = sMeter & 0xff;
+
+        *flags = 0;
+		if (rx_adc_ovfl) *flags |= SND_FLAG_ADC_OVFL;
+        if (mode == MODE_IQ) *flags |= SND_FLAG_MODE_IQ;
+        if (compression && mode != MODE_IQ) *flags |= SND_FLAG_COMPRESSED;
 
 		if (change_LPF) {
-			out_pkt.h.smeter[0] |= SND_FLAG_LPF;
+			*flags |= SND_FLAG_LPF;
 			change_LPF = false;
 		}
-		
+
+		if (change_freq_mode) {
+			*flags |= SND_FLAG_NEW_FREQ;
+		    change_freq_mode = false;
+		}
+
 		// send sequence number that waterfall syncs to on client-side
 		snd->seq++;
-		out_pkt.h.seq = snd->seq;
-		
+		*seq = snd->seq;
+
 		//printf("hdr %d S%d\n", sizeof(out_pkt.h), bc); fflush(stdout);
-		int bytes = sizeof(out_pkt.h) + bc;
-		app_to_web(conn, (char*) &out_pkt, bytes);
-		audio_bytes += sizeof(out_pkt.h.smeter) + bc;
-		
+		if (mode == MODE_IQ) {
+			const int bytes = sizeof(out_pkt_iq.h) + bc;
+			app_to_web(conn, (char*) &out_pkt_iq, bytes);
+			audio_bytes += sizeof(out_pkt_iq.h.smeter) + bc;
+		} else {
+			const int bytes = sizeof(out_pkt_real.h) + bc;
+			app_to_web(conn, (char*) &out_pkt_real, bytes);
+			audio_bytes += sizeof(out_pkt_real.h.smeter) + bc;
+		}
+
 		#if 0
 			static u4_t last_time[RX_CHANS];
 			u4_t now = timer_ms();
 			printf("SND%d: %d %.3fs seq-%d\n", rx_chan, bytes,
-				(float) (now - last_time[rx_chan]) / 1e3, out_pkt.h.seq);
+				(float) (now - last_time[rx_chan]) / 1e3, *seq);
 			last_time[rx_chan] = now;
 		#endif
-		
+
 		#if 0
             static u4_t last_time[RX_CHANS];
             static int nctr;
@@ -696,9 +879,8 @@ void c2s_sound(void *param)
                 printf("SND%d: %d %d %.3fs\n", rx_chan, SND_RATE, nbuf, (float) (now - last_time[rx_chan]) / 1e3);
                 
                 #if 0
-                    static SPI_MISO status;
-                    spi_get(CmdGetStatus, &status, 2);
-                    if (status.word[0] & STAT_OVFL) {
+                    stat_reg_t stat = stat_get();
+                    if (stat.word & STAT_OVFL) {
                         //printf("OVERFLOW ==============================================");
                         spi_set(CmdClrRXOvfl);
                     }

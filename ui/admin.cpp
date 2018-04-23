@@ -33,10 +33,12 @@ Boston, MA  02110-1301, USA.
 #include "debug.h"
 #include "printf.h"
 #include "cfg.h"
-#include "ext_int.h"
-#include "wspr.h"
-#include "data_pump.h"
 #include "clk.h"
+
+#if RX_CHANS
+ #include "data_pump.h"
+ #include "ext_int.h"
+#endif
 
 #include <string.h>
 #include <stdio.h>
@@ -61,6 +63,7 @@ void c2s_admin_setup(void *param)
 	conn_t *conn = (conn_t *) param;
 
 	// send initial values
+	send_msg(conn, SM_NO_DEBUG, "ADM sdr_mode=%d", VAL_SDR_GPS_BUILD);
 	send_msg(conn, SM_NO_DEBUG, "ADM init=%d", RX_CHANS);
 }
 
@@ -87,7 +90,7 @@ static void console(void *param)
 
 	char *tname;
     asprintf(&tname, "console[%02d]", c->self_idx);
-    TaskNameS(tname);
+    TaskNameSFree(tname);
     clprintf(c, "CONSOLE: open connection\n");
     send_msg_encoded(c, "ADM", "console_c2w", "CONSOLE: open connection\n");
     
@@ -154,6 +157,12 @@ static void console(void *param)
             c->send_ctrl_c = false;
         }
 
+        if (c->send_ctrl_d) {
+            write(c->master_pty_fd, "\x04", 1);
+            //printf("sent ^D\n");
+            c->send_ctrl_d = false;
+        }
+
         if (c->send_ctrl_backslash) {
             write(c->master_pty_fd, "\x1c", 1);
             //printf("sent ^\\\n");
@@ -185,7 +194,7 @@ static void console(void *param)
     #undef NBUF
 }
 
-bool backup_in_progress, DUC_enable_start;
+bool backup_in_progress, DUC_enable_start, rev_enable_start;
 
 void c2s_admin(void *param)
 {
@@ -268,7 +277,7 @@ void c2s_admin(void *param)
 						grid6[0] = '\0';
 					else
 						grid6[6] = '\0';
-					asprintf(&sb2, ",\"lat\":\"%8.6f\",\"lon\":\"%8.6f\",\"grid\":\"%s\"",
+					asprintf(&sb2, ",\"lat\":\"%4.2f\",\"lon\":\"%4.2f\",\"grid\":\"%s\"",
 						gps.sgnLat, gps.sgnLon, grid6);
 					sb = kstr_cat(sb, kstr_wrap(sb2));
 				}
@@ -280,7 +289,9 @@ void c2s_admin(void *param)
 
 			i = strcmp(cmd, "SET extint_load_extension_configs");
 			if (i == 0) {
+#if RX_CHANS
 				extint_load_extension_configs(conn);
+#endif
 				send_msg(conn, SM_NO_DEBUG, "ADM auto_nat=%d", ddns.auto_nat);
 				continue;
 			}
@@ -293,12 +304,20 @@ void c2s_admin(void *param)
 				continue;
 			}
 		
+			i = strcmp(cmd, "SET rev_status_query");
+			if (i == 0) {
+				if (rev_enable_start) {
+					send_msg(conn, SM_NO_DEBUG, "ADM rev_status=200");
+				}
+				continue;
+			}
+		
 			i = strcmp(cmd, "SET check_port_open");
 			if (i == 0) {
 	            const char *server_url = cfg_string("server_url", NULL, CFG_OPTIONAL);
                 int status;
 			    char *cmd_p, *reply;
-		        asprintf(&cmd_p, "curl -s --connect-timeout 10 \"kiwisdr.com/php/check_port_open.php/?url=%s:%d\"", server_url, ddns.port_ext);
+		        asprintf(&cmd_p, "curl -s --ipv4 --connect-timeout 15 \"kiwisdr.com/php/check_port_open.php/?url=%s:%d\"", server_url, ddns.port_ext);
                 reply = non_blocking_cmd(cmd_p, &status);
                 printf("check_port_open: %s\n", cmd_p);
                 free(cmd_p);
@@ -321,17 +340,18 @@ void c2s_admin(void *param)
 			int force_check, force_build;
 			i = sscanf(cmd, "SET force_check=%d force_build=%d", &force_check, &force_build);
 			if (i == 2) {
-			    if (conn->admin_demo_mode && force_build) continue;
 				check_for_update(force_build? FORCE_BUILD : FORCE_CHECK, conn);
 				continue;
 			}
-					
+
+#if RX_CHANS
 			i = strcmp(cmd, "SET dpump_hist_reset");
 			if (i == 0) {
 			    dpump_resets = 0;
 		        memset(dpump_hist, 0, sizeof(dpump_hist));
 				continue;
 			}
+#endif
 
 			i = strcmp(cmd, "SET log_dump");
 			if (i == 0) {
@@ -343,17 +363,6 @@ void c2s_admin(void *param)
 			if (i == 0) {
 		        TaskDump(TDUMP_CLR_HIST);
 				continue;
-			}
-
-			
-			// Any commands below here are simply ignored in admin demo mode
-			
-			if (conn->auth_admin == false) {
-			    if (conn->admin_demo_mode) {
-			        continue;
-			    } else {
-			    
-			    }
 			}
 
 			i = strcmp(cmd, "SET reload_index_params");
@@ -420,6 +429,7 @@ void c2s_admin(void *param)
 			i = sscanf(cmd, "SET static_ip=%32ms static_nm=%32ms static_gw=%32ms", &static_ip_m, &static_nm_m, &static_gw_m);
 			if (i == 3) {
 				clprintf(conn, "eth0: USE STATIC ip=%s nm=%s gw=%s\n", static_ip_m, static_nm_m, static_gw_m);
+
 				system("cp /etc/network/interfaces /etc/network/interfaces.bak");
 				FILE *fp;
 				scallz("/tmp/interfaces.kiwi fopen", (fp = fopen("/tmp/interfaces.kiwi", "w")));
@@ -441,6 +451,39 @@ void c2s_admin(void *param)
 				continue;
 			}
 			free(static_ip_m); free(static_nm_m); free(static_gw_m);
+
+            char *dns1_m = NULL, *dns2_m = NULL;
+			i = strncmp(cmd, "SET dns", 7);
+			if (i == 0) {
+                i = sscanf(cmd, "SET dns dns1=%32ms dns2=%32ms", &dns1_m, &dns2_m);
+                kiwi_str_decode_inplace(dns1_m);
+                kiwi_str_decode_inplace(dns2_m);
+                char *dns1 = (dns1_m[0] == 'x')? (dns1_m + 1) : dns1_m;
+                char *dns2 = (dns2_m[0] == 'x')? (dns2_m + 1) : dns2_m;
+                clprintf(conn, "SET dns1=%s dns2=%s\n", dns1, dns2);
+
+                bool dns1_err, dns2_err;
+                inet4_d2h(dns1, &dns1_err, NULL, NULL, NULL, NULL);
+                inet4_d2h(dns2, &dns2_err, NULL, NULL, NULL, NULL);
+
+                if (!dns1_err || !dns2_err) {
+                    char *s;
+                    system("rm -f /etc/resolv.conf; touch /etc/resolv.conf");
+    
+                    if (!dns1_err) {
+                        asprintf(&s, "echo nameserver %s >> /etc/resolv.conf", dns1);
+                        system(s); free(s);
+                    }
+                    
+                    if (!dns2_err) {
+                        asprintf(&s, "echo nameserver %s >> /etc/resolv.conf", dns2);
+                        system(s); free(s);
+                    }
+                }
+                
+                free(dns1_m); free(dns2_m);
+				continue;
+			}
 
 #define SD_CMD "cd /root/" REPO_NAME "/tools; ./kiwiSDR-make-microSD-flasher-from-eMMC.sh --called_from_kiwi_server"
 			i = strcmp(cmd, "SET microSD_write");
@@ -513,15 +556,83 @@ void c2s_admin(void *param)
 				continue;
 			}
 		
+			char *user_m = NULL, *host_m = NULL;
+			n = sscanf(cmd, "SET rev_register user=%256ms host=%256ms", &user_m, &host_m);
+			if (n == 2) {
+			    // FIXME: validate unencoded user & host for allowed characters
+				system("killall -q frpc; sleep 1");
+
+                int status;
+			    char *cmd_p, *reply;
+		        asprintf(&cmd_p, "curl -s --ipv4 --connect-timeout 15 \"proxy.kiwisdr.com/?u=%s&h=%s\"", user_m, host_m);
+                reply = non_blocking_cmd(cmd_p, &status);
+                printf("proxy register: %s\n", cmd_p);
+                free(cmd_p);
+                if (reply == NULL || status < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                    printf("proxy register: ERROR %p 0x%x\n", reply, status);
+                    status = 900;
+                } else {
+                    char *rp = kstr_sp(reply);
+                    printf("proxy register: reply: %s\n", rp);
+                    status = -1;
+                    n = sscanf(rp, "status=%d", &status);
+                    printf("proxy register: n=%d status=%d\n", n, status);
+                }
+                kstr_free(reply);
+
+				send_msg(conn, SM_NO_DEBUG, "ADM rev_status=%d", status);
+				if (status < 0 || status > 99) {
+				    free(user_m); free(host_m);
+				    continue;
+				}
+				
+				u4_t server = status & 0xf;
+				
+				asprintf(&cmd_p, "sed -e s/SERVER/%d/ -e s/USER/%s/ -e s/HOST/%s/ %s >%s",
+				    server, user_m, host_m, DIR_CFG "/frpc.template.ini", DIR_CFG "/frpc.ini");
+                printf("proxy register: %s\n", cmd_p);
+				system(cmd_p);
+                free(cmd_p);
+				free(user_m); free(host_m);
+
+                if (background_mode)
+                    system("/usr/local/bin/frpc -c " DIR_CFG "/frpc.ini &");
+                else
+                    system("./pkgs/frp/frpc -c " DIR_CFG "/frpc.ini &");
+				
+				continue;
+			} else
+			if (n == 1)
+                free(user_m);
+		
 			i = strcmp(cmd, "SET console_open");
 			if (i == 0) {
-			    if (conn->child_pid == 0) CreateTask(console, conn, ADMIN_PRIORITY);
+			    if (conn->child_pid == 0) {
+			        bool no_console = false;
+			        struct stat st;
+		            if (stat(DIR_CFG "/opt.no_console", &st) == 0)
+		                no_console = true;
+			        if (no_console == false && conn->isLocal) {
+			            CreateTask(console, conn, ADMIN_PRIORITY);
+			        } else
+			        if (no_console) {
+                        send_msg_encoded(conn, "ADM", "console_c2w", "CONSOLE: disabled by kiwi.config/opt.no_console\n");
+			        } else {
+                        send_msg_encoded(conn, "ADM", "console_c2w", "CONSOLE: only available to local admin connections\n");
+			        }
+			    }
 				continue;
 			}
 
 			i = strcmp(cmd, "SET console_ctrl_C");
 			if (i == 0) {
 			    if (conn->child_pid && !conn->send_ctrl_c) conn->send_ctrl_c = true;
+				continue;
+			}
+
+			i = strcmp(cmd, "SET console_ctrl_D");
+			if (i == 0) {
+			    if (conn->child_pid && !conn->send_ctrl_d) conn->send_ctrl_d = true;
 				continue;
 			}
 

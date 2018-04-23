@@ -46,6 +46,16 @@ Boston, MA  02110-1301, USA.
 
 u2_t ctrl_get();
 void ctrl_clr_set(u2_t clr, u2_t set);
+void ctrl_positive_pulse(u2_t bits);
+
+union stat_reg_t {
+    u2_t word;
+    struct {
+        u2_t fpga_id:4, stat_user:4, fpga_ver:4, fw_id:3, ovfl:1;
+    };
+};
+stat_reg_t stat_get();
+
 u2_t getmem(u2_t addr);
 void printmem(const char *str, u2_t addr);
 float ecpu_use();
@@ -58,9 +68,11 @@ char *kiwi_authkey();
 #define SM_NO_DEBUG	false
 void send_msg_buf(conn_t *c, char *s, int slen);
 void send_msg(conn_t *c, bool debug, const char *msg, ...);
-void send_msg_mc(struct mg_connection *mc, bool debug, const char *msg, ...);
 void send_msg_data(conn_t *c, bool debug, u1_t dst, u1_t *bytes, int nbytes);
+void send_msg_mc(struct mg_connection *mc, bool debug, const char *msg, ...);
 void send_msg_encoded(conn_t *conn, const char *dst, const char *cmd, const char *fmt, ...);
+void send_msg_mc_encoded(struct mg_connection *mc, const char *dst, const char *cmd, const char *fmt, ...);
+void input_msg_internal(conn_t *conn, const char *fmt, ...);
 
 void print_max_min_stream_i(void **state, const char *name, int index, int nargs, ...);
 void print_max_min_stream_f(void **state, const char *name, int index, int nargs, ...);
@@ -75,3 +87,28 @@ int snd_file_open(const char *fn, int nchans, double srate);
 
 FILE *pgm_file_open(const char *fn, int *offset, int width, int height, int depth);
 void pgm_file_height(FILE *fp, int offset, int height);
+
+typedef struct {
+	double lat, lon;
+} latLon_t;
+
+#define latLon_deg_to_rad(loc) \
+	loc.lat = DEG_2_RAD(loc.lat); \
+	loc.lon = DEG_2_RAD(loc.lon);
+
+// field square subsquare (extended square)
+//   A-R    0-9       a-x              0-9
+//   #18    #10       #24              #10
+
+#define SQ_LON_DEG		2.0
+#define SQ_LAT_DEG		1.0
+#define SUBSQ_PER_SQ	24.0
+#define SUBSQ_LON_DEG	(SQ_LON_DEG / SUBSQ_PER_SQ)
+#define SUBSQ_LAT_DEG	(SQ_LAT_DEG / SUBSQ_PER_SQ)
+
+#define SQ_PER_FLD		10.0
+#define	FLD_DEG_LON		(SQ_PER_FLD * SQ_LON_DEG)
+#define	FLD_DEG_LAT		(SQ_PER_FLD * SQ_LAT_DEG)
+
+void grid_to_latLon(char *grid, latLon_t *loc);
+int latLon_to_grid6(latLon_t *loc, char *grid);

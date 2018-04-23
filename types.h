@@ -34,6 +34,8 @@ typedef int (*funcPR_t)(void *);
 #define S14_32(w)			S4( S2( U2(w) | ((U2(w) & 0x2000)? 0xffffc000:0 ) ) )
 #define S24_8_16(h8,l16)	S4( (U1(h8)<<16) | U2(l16) | ((U1(h8) & 0x80)? 0xff000000:0) )
 #define S24_16_8(h16,l8)	S4( (U2(h16)<<8) | U1(l8) | ((U2(h16) & 0x8000)? 0xff000000:0) )
+#define S18_2_16(h2,l16)    S4( (U4(h2)<<16) | U4(l16) | ((U2(h2) & 0x0002)? 0xfffc0000:0) )
+#define S32_16_16(h16,l16)  S4( (U4(h16)<<16) | U4(l16) )
 
 #define B2I(bytes)			(((bytes)+3)/4)
 #define I2B(ints)			((ints)*4)
@@ -75,6 +77,14 @@ typedef int (*funcPR_t)(void *);
 #define max(a,b) MAX(a,b)
 #define MIN(a,b) ((a)<(b)?(a):(b))
 #define min(a,b) MIN(a,b)
+
+#define I_DIV_CEIL(v,n) (((v)+(n))/(n))
+
+#define M_2_KM(m) ((m) / 1e3)
+#define KM_2_M(km) ((km) * 1e3)
+
+#define DEG_2_RAD(deg) ((deg) * K_PI / 180.0)
+#define RAD_2_DEG(rad) ((rad) * 180.0 / K_PI)
 
 #define SI_CLAMP(a,n) ( ((a) > ((n)-1))? ((n)-1) : ( ((a) < -(n))? -(n) : (a) ) )
 

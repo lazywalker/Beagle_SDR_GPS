@@ -138,9 +138,11 @@ function wspr_recv(data)
 				wspr_controls_setup();		// needs wspr_startx
 				break;
 
-			case "WSPR_TIME":
-				wspr_server_time_ms = param[1] * 1000;
+			case "WSPR_TIME_MSEC":
+				wspr_server_time_ms = param[1] * 1000 + (+param[2]);
 				wspr_local_time_epoch_ms = Date.now();
+			   //console.log('WSPR_TIME_MSEC server: '+ (new Date(wspr_server_time_ms)).toUTCString() +
+			   //   ' local: '+ (new Date(wspr_local_time_epoch_ms)).toUTCString());
 				break;
 
 			case "WSPR_SYNC":
@@ -196,19 +198,21 @@ function wspr_recv(data)
 					var snr_call = p[i*2+1];
 					var snr = snr_call.filterInt();
 					var color;
+					
 					if (isNaN(snr)) {
 						color = (flags & WSPR_F_IMAGE)? 'cl-wspr-image' : 'cl-wspr-call';
 					} else {
 						snr_call = snr.toFixed(0);
 						color = (flags & WSPR_F_DECODING)? 'cl-wspr-decoding':'';
 					}
+					
 					s +=
-						'<div class="cl-wspr-mkr1" style="max-width:'+ (nextx-x) +'px; left:'+ (x-6) +'px; bottom:8px" title="">' +
-							'<div class="cl-wspr-mkr2">' +
-								'<div class="cl-wspr-snr '+ color +'">'+ snr_call +'<\/div>' +
-							'<\/div>' +
-						'<\/div>' +
-						'<div class="cl-wspr-line '+ color +'" style="width:1px; height:10px; position:absolute; left:'+ x +'px; bottom:0px" title=""><\/div>';
+						w3_div('cl-wspr-mkr1|max-width:'+ (nextx-x) +'px; left:'+ (x-6) +'px; bottom:8px',
+							w3_div('cl-wspr-mkr2',
+								w3_div('cl-wspr-snr '+ color, snr_call)
+							)
+						) +
+						w3_div('cl-wspr-line '+ color +'|width:1px; height:10px; position:absolute; left:'+ x +'px; bottom:0px;');
 				}
 				
 				html('id-wspr-peaks-labels').innerHTML = s;
@@ -246,21 +250,21 @@ var wspr_init_band = -1;
 function wspr_controls_setup()
 {
    var data_html =
-      '<div id="id-wspr-time-display" style="top:50px; background-color:black; position:relative;"></div>' +
+      time_display_html('wspr') +
 
-      '<div id="id-wspr-peaks" class="scale" style="width:1024px; height:30px; background-color:black; position:relative; display:none" title="WSPR">'+
-      	'<div id="id-wspr-peaks-labels" style="width:1024px; height:30px; position:absolute"></div>'+
-      '</div>' +
+      w3_div('id-wspr-peaks|width:1024px; height:30px; background-color:black; position:relative;',
+      	w3_div('id-wspr-peaks-labels|width:1024px; height:30px; position:absolute;')
+      ) +
 
-   	'<div id="id-wspr-spectrum" style="width:1024px; height:150px; overflow:hidden; position:relative; display:none">'+
+   	w3_div('id-wspr-spectrum|width:1024px; height:150px; overflow:hidden; position:relative;',
 			// two overlapping canvases to implement scrolling
-   		'<canvas id="id-wspr-spectrum-A" width="1024" height="150" style="position:absolute">test</canvas>'+
-   		'<canvas id="id-wspr-spectrum-B" width="1024" height="150" style="position:absolute">test</canvas>'+
-   	'</div>' +
+   		'<canvas id="id-wspr-spectrum-A" width="1024" height="150" style="position:absolute">test</canvas>',
+   		'<canvas id="id-wspr-spectrum-B" width="1024" height="150" style="position:absolute">test</canvas>'
+   	) +
    	
-      '<div id="id-wspr-scale" class="scale" style="width:1024px; height:20px; background-color:black; position:relative; display:none" title="WSPR">'+
-   		'<canvas id="id-wspr-scale-canvas" width="1024" height="20" style="position:absolute"></canvas>'+
-      '</div>';
+      w3_div('id-wspr-scale|width:1024px; height:20px; background-color:black; position:relative;',
+   		'<canvas id="id-wspr-scale-canvas" width="1024" height="20" style="position:absolute"></canvas>'
+      );
    
    var call = ext_get_cfg_param_string('WSPR.callsign', '');
    if (call == undefined || call == null || call == '') {
@@ -272,19 +276,35 @@ function wspr_controls_setup()
    	grid = '(not set)';
    	wspr_config_okay = false;
    }
+   
+   // re-define band menu if down-converter in use
+   var r = ext_get_freq_range();
+   if (r.lo_kHz > 32000 && r.hi_kHz > 32000) {
+      var f_kHz;
+      for (i = 0; i < wspr_xvtr_center_freqs.length-1; i++) {
+         f_kHz = wspr_xvtr_center_freqs[i];
+         if (f_kHz >= r.lo_kHz && f_kHz <= r.hi_kHz)
+            break;
+      }
+      if (i != wspr_xvtr_center_freqs.length) {
+         wspr_center_freqs = [ f_kHz ];
+         wspr_freqs_u = { 0:wspr_xvtr_freqs_u[i] };
+         if (wspr_init_band > 0) wspr_init_band = 0;
+      }
+   }
 
 	var controls_html =
-	w3_divs('id-wspr-controls', '',
+	w3_div('id-wspr-controls',
 		w3_col_percent('', '',
 			w3_table('w3-table-fixed w3-centered',
 				w3_table_row('',
 					w3_table_cells('',
-						w3_select('', 'band', 'wspr_init_band', wspr_init_band, wspr_freqs_u, 'wspr_band_select_cb'),
+						w3_select('', '', 'band', 'wspr_init_band', wspr_init_band, wspr_freqs_u, 'wspr_band_select_cb'),
 						w3_button('cl-wspr-button', 'stop', 'wspr_stop_start_cb'),
 						w3_button('cl-wspr-button', 'clear', 'wspr_clear_cb')
 					),
 					
-					w3_table_cells('||colspan="2"',
+					w3_table_cells('',
 						w3_divs('', 'id-wspr-upload-bkg cl-upload-checkbox',
 							'<input id="id-wspr-upload" type="checkbox" value="" onclick="wspr_set_upload(this.checked)"> upload spots'
 						)
@@ -302,49 +322,54 @@ function wspr_controls_setup()
 		w3_table('w3-table-fixed',
 			w3_table_row('w3-vcenter',
 				w3_table_cells('',
-					'<div class="cl-wspr-pie" style="background-color:#575757">' +
-						kiwi_pie('id-wspr-pie', pie_size, '#eeeeee', 'deepSkyBlue') +
-					'</div>',
-					w3_divs('', '',
-						w3_divs('id-wspr-time cl-wspr-text', '', ''),
-						w3_divs('id-wspr-status cl-wspr-text', '', '')
+					w3_div('cl-wspr-pie|background-color:#575757',
+						kiwi_pie('id-wspr-pie', pie_size, '#eeeeee', 'deepSkyBlue')
+					),
+					w3_div('',
+						w3_div('id-wspr-time cl-wspr-text'),
+						w3_div('id-wspr-status cl-wspr-text')
 					),
 					// FIXME: field validation
-					w3_divs('', '',
-						w3_divs('cl-wspr-text', '', 'BFO '+ wspr_bfo),
+					w3_div('',
+						w3_div('cl-wspr-text', 'BFO '+ wspr_bfo),
 						w3_divs('id-wspr-cf cl-wspr-text', ' ')
 					),
-					w3_divs('cl-wspr-text', '', 'reporter call '+ call),
-					w3_divs('cl-wspr-text', '', 'reporter grid '+ grid)
+					w3_div('cl-wspr-text', 'reporter call '+ call),
+					w3_div('cl-wspr-text', 'reporter grid '+ grid)
 				)
 			)
 		),
 		
-		'<div style="background-color:lightGray; overflow:auto; width:100%; margin-top:5px; margin-bottom:0px; font-family:monospace; font-size:100%">'+
-			'<pre style="display:inline"> UTC  dB   dT      Freq dF  Call   Grid    km  dBm</pre>'+
+		w3_div('|background-color:lightGray; overflow:auto; width:100%; margin-top:5px; margin-bottom:0px; font-family:monospace; font-size:100%',
+			'<pre style="display:inline"> UTC  dB   dT      Freq dF  Call   Grid    km  dBm</pre>'
 			//                                                   dd  cccccc GGGG ddddd  nnn (n W)
-		'</div>'+
-		'<div id="id-wspr-decode" style="white-space:pre; background-color:#eeeeee; overflow:scroll; height:100px; width:100%; margin-top:0px; font-family:monospace; font-size:100%"></div>'
+		) +
+		w3_div('id-wspr-decode|white-space:pre; background-color:white; overflow:scroll; height:100px; width:100%; margin-top:0px; font-family:monospace; font-size:100%')
 	);
 
 	ext_panel_show(controls_html, data_html, null);
 	ext_set_controls_width_height(null, 240);
-	time_display_setup('id-wspr-time-display');
-
-	wspr_spectrum_A = w3_el_id('id-wspr-spectrum-A');
+	time_display_setup('wspr');
+	//wspr_resize();
+	
+	wspr_spectrum_A = w3_el('id-wspr-spectrum-A');
 	wspr_spectrum_A.ct = wspr_spectrum_A.getContext("2d");
 	wspr_spectrum_A.im = wspr_spectrum_A.ct.createImageData(1024, 1);
 
-	wspr_spectrum_B = w3_el_id('id-wspr-spectrum-B');
+	wspr_spectrum_B = w3_el('id-wspr-spectrum-B');
 	wspr_spectrum_B.ct = wspr_spectrum_B.getContext("2d");
 	wspr_spectrum_B.im = wspr_spectrum_B.ct.createImageData(1024, 1);
 	
 	wccva = wspr_spectrum_A; wccvao = wspr_spectrum_B;
 
-	wspr_scale_canvas = w3_el_id('id-wspr-scale-canvas');
+	wspr_scale_canvas = w3_el('id-wspr-scale-canvas');
 	wspr_scale_canvas.ct = wspr_scale_canvas.getContext("2d");
 
-	wspr_visible(1);
+   wspr_pie_interval = setInterval(wspr_draw_pie, 1000);
+   wspr_draw_pie();
+   wspr_draw_scale(100);
+   wspr_reset();
+   wspr_upload_timeout = setTimeout(function() {wspr_upload(wspr_report_e.STATUS);}, 1000);
 	
 	// set band and start if URL parameter present
 	var p = ext_param();
@@ -363,6 +388,16 @@ function wspr_controls_setup()
 	}
 }
 
+/*
+function wspr_resize()
+{
+	var left = (window.innerWidth - 1024 - time_display_width()) / 2;
+	w3_el('id-wspr-peaks').style.left = px(left);
+	w3_el('id-wspr-spectrum').style.left = px(left);
+	w3_el('id-wspr-scale').style.left = px(left);
+}
+*/
+
 function wspr_band_select_cb(path, idx, first)
 {
 	//console.log('wspr_band_select_cb idx='+ idx +' path='+ path);
@@ -373,29 +408,74 @@ function wspr_band_select_cb(path, idx, first)
 	}
 }
 
+function wspr_focus()
+{
+   //console.log('### wspr_focus');
+   var el = w3_el('id-wspr-grid-set');
+   // when focus is from admin extension tab
+	if (el) {
+	   el.onclick = function() {
+	      // FIXME
+         var val = '???';
+         //w3_set_value('WSPR.grid', val);
+         //w3_input_change('WSPR.grid', 'wspr_input_grid');
+      };
+   }
+}
+
 function wspr_blur()
 {
 	//console.log('### wspr_blur');
-	ext_send('SET capture=0');
-	wspr_visible(0);
+   var el = w3_el('id-wspr-grid-set');
+   // when focus is _not_ from admin extension tab
+	if (!el) {
+      ext_send('SET capture=0');
+      kiwi_clearTimeout(wspr_upload_timeout);
+      kiwi_clearInterval(wspr_pie_interval);
+   }
 }
+
+function wspr_input_grid(path, val)
+{
+	w3_string_set_cfg_cb(path, val);
+	//sdr_hu_update_check_grid();
+}
+
+var wspr_autorun_u = { 0:'regular use', 1:'LF', 2:'MF', 3:'160m', 4:'80m_JA', 5:'80m', 6:'60m', 7:'60m_EU', 8:'40m', 9:'30m', 10:'20m', 11:'17m', 12:'15m', 13:'12m', 14:'10m' };
 
 function wspr_config_html()
 {
 	ext_admin_config(wspr_ext_name, 'WSPR',
-		w3_divs('id-wspr w3-text-teal w3-hide', '',
-			'<b>WSPR configuration</b>' +
-			'<hr>' +
+		w3_div('id-wspr w3-text-teal w3-hide',
+			'<b>WSPR configuration</b>',
+			'<hr>',
 			w3_half('', 'w3-container',
 				w3_divs('', 'w3-margin-bottom',
 					w3_input_get_param('BFO Hz (multiple of 375 Hz, i.e. 375, 750, 1125, 1500)', 'WSPR.BFO', 'w3_num_set_cfg_cb', '', 'typically 750 Hz'),
 					w3_input_get_param('Reporter callsign', 'WSPR.callsign', 'w3_string_set_cfg_cb', ''),
-					w3_input_get_param('Reporter grid square ', 'WSPR.grid', 'w3_string_set_cfg_cb', '', '4 or 6-character grid square location', '',
-						w3_div('id-wspr-grid-set cl-admin-check w3-inline w3-blue w3-pointer w3-hide', 'set from GPS')	// FIXME
+					w3_input_get_param('Reporter grid square ', 'WSPR.grid', 'wspr_input_grid', '', '4 or 6-character grid square location', '',
+						w3_div('id-wspr-grid-set cl-admin-check w3-show-inline-block w3-blue w3-btn w3-round-large w3-hide', 'set from GPS')
 					)
 				), ''
+			),
+			'<hr>',
+			w3_div('w3-container',
+            w3_div('', '<b>Autorun</b>'),
+			   w3_div('w3-container',
+               w3_div('w3-text-black', 'On startup automatically begins running the WSPR decoder on the selected band(s).'),
+               w3_div('w3-text-black', 'Channels available for regular use are reduced by one for each WSPR autorun channel enabled.'),
+               w3_div('w3-text-black', 'Spot decodes available in the Kiwi log (use "Log" tab above) and listed on <a href="http://wsprnet.org/drupal/wsprnet/spots" target="_blank">wsprnet.org</a>'),
+               w3_div('w3-text-black', 'The three fields above must be set to valid values for proper spot entry into the <a href="http://wsprnet.org/drupal/wsprnet/spots" target="_blank">wsprnet.org</a> database.'),
+               w3_div('w3-text-red w3-margin-bottom', 'Must restart the KiwiSDR server for changes to have effect.'),
+               w3_divs('', 'w3-restart w3-show-inline-block w3-margin-right',
+                  w3_select_get_param('|color:red', 'Channel 0', 'WSPR band', 'WSPR.autorun0', wspr_autorun_u, 'admin_select_cb'),
+                  w3_select_get_param('|color:red', 'Channel 1', 'WSPR band', 'WSPR.autorun1', wspr_autorun_u, 'admin_select_cb'),
+                  w3_select_get_param('|color:red', 'Channel 2', 'WSPR band', 'WSPR.autorun2', wspr_autorun_u, 'admin_select_cb'),
+                  w3_select_get_param('|color:red', 'Channel 3', 'WSPR band', 'WSPR.autorun3', wspr_autorun_u, 'admin_select_cb')
+               )
+            )
 			)
-		)
+		), 'wspr'
 	);
 }
 
@@ -433,25 +513,6 @@ function wspr_clear_cb(path, idx, first)
 }
 
 var wspr_upload_timeout, wspr_pie_interval;
-
-function wspr_visible(v)
-{
-	//visible_block('id-wspr-controls', v);
-	visible_block('id-wspr-peaks', v);
-	visible_block('id-wspr-spectrum', v);
-	visible_block('id-wspr-scale', v);
-
-	if (v) {
-		wspr_pie_interval = setInterval(wspr_draw_pie, 1000);
-		wspr_draw_pie();
-   	wspr_draw_scale(100);
-		wspr_reset();
-		wspr_upload_timeout = setTimeout(function() {wspr_upload(wspr_report_e.STATUS);}, 1000);
-	} else {
-   	kiwi_clearTimeout(wspr_upload_timeout);
-   	kiwi_clearInterval(wspr_pie_interval);
-	}
-}
 
 function wspr_draw_scale(cf)
 {
@@ -548,7 +609,7 @@ function wspr_upload(type, s)
 	
 	kiwi_GETrequest_param(request, "dbm", dbm);
 
-	var version = "1.2 Kiwi";
+	var version = "1.3 Kiwi";
 	if (version.length <= 10) {
 		kiwi_GETrequest_param(request, "version", version);
 		kiwi_GETrequest_submit(request, false);
@@ -586,9 +647,16 @@ function wspr_draw_pie() {
 };
 
 // order matches menu instantiation order
-var wspr_center_freqs = [ 137.5, 475.7, 1838.1, 3594.1, 5288.7, 7040.1, 10140.2, 14097.1, 18106.1, 21096.1, 24926.1, 28126.1 ];
-var wspr_freqs_s = { 'lf':0, 'mf':1, '160m':2, '80m':3, '60m':4, '40m':5, '30m':6, '20m':7, '17m':8, '15m':9, '12m':10, '10m':11 };
-var wspr_freqs_u = { 0:'LF', 1:'MF', 2:'160m', 3:'80m', 4:'60m', 5:'40m', 6:'30m', 7:'20m', 8:'17m', 9:'15m', 10:'12m', 11:'10m' };
+// see: wsprnet.org/drupal/node/7352
+var wspr_center_freqs = [ 137.5, 475.7, 1838.1, 3570.1, 3594.1, 5288.7, 5366.2, 7040.1, 10140.2, 14097.1, 18106.1, 21096.1, 24926.1, 28126.1 ];
+
+var wspr_freqs_s = { 'lf':0, 'mf':1, '160m':2, '80m_JA':3, '80m':4, '60m':5, '60m_EU':6, '40m':7, '30m':8, '20m':9, '17m':10, '15m':11, '12m':12, '10m':13,
+                     '6m':0, '4m':0, '2m':0, '70cm':0, '440':0, '23cm':0, '1296':0 };
+var wspr_freqs_u = { 0:'LF', 1:'MF', 2:'160m', 3:'80m_JA', 4:'80m', 5:'60m', 6:'60m_EU', 7:'40m', 8:'30m', 9:'20m', 10:'17m', 11:'15m', 12:'12m', 13:'10m' };
+
+var wspr_xvtr_center_freqs = [ 50294.5, 70092.5, 144490.5, 432301.5, 1296501.5 ];
+var wspr_xvtr_freqs_u = [ '6m', '4m', '2m', '70cm', '23cm' ];
+
 var wspr_rfreq=0, wspr_tfreq=0;
 var wspr_bfo = 750;
 var wspr_filter_bw = 300;
@@ -604,19 +672,21 @@ function wspr_freq(b)
 	
 	/*
 	if (wspr_last_freq >= 0)
-		w3_el_id('id-wspr-freq-'+ wspr_last_freq).style.backgroundColor = 'white';
-	w3_el_id('id-wspr-freq-'+ b).style.backgroundColor = 'lime';
+		w3_el('id-wspr-freq-'+ wspr_last_freq).style.backgroundColor = 'white';
+	w3_el('id-wspr-freq-'+ b).style.backgroundColor = 'lime';
 	wspr_last_freq = b;
 	*/
 
-	w3_el_id('id-wspr-cf').innerHTML = 'CF '+ cf.toFixed(1);
+	w3_el('id-wspr-cf').innerHTML = 'CF '+ cf.toFixed(1);
 	var cfo = Math.round((cf - Math.floor(cf)) * 1000);
 	wspr_rfreq = wspr_tfreq = cf/1000;
 	var dial_freq_kHz = cf - wspr_bfo/1000;
-	ext_tune(dial_freq_kHz, 'usb', ext_zoom.MAX_IN);
+	var r = ext_get_freq_range();
+	var fo_kHz = dial_freq_kHz - r.offset_kHz;
+	ext_tune(fo_kHz, 'usb', ext_zoom.MAX_IN);
 	ext_send('SET dialfreq='+ dial_freq_kHz.toFixed(2) +' cf_offset='+ cfo);
 	ext_set_passband(wspr_bfo-wspr_filter_bw/2, wspr_bfo+wspr_filter_bw/2);
-	ext_tune(dial_freq_kHz, 'usb', ext_zoom.MAX_IN);		// FIXME: temp hack so new passband gets re-centered
+	ext_tune(fo_kHz, 'usb', ext_zoom.MAX_IN);		// FIXME: temp hack so new passband gets re-centered
 
 	var rgrid = ext_get_cfg_param_string('WSPR.grid', '');
 	//console.log('rgrid=<'+ rgrid +'>');

@@ -14,7 +14,7 @@ try {
 	console.log("kiwi_util: String.prototype.includes");
 }
 
-//http://stackoverflow.com/questions/646628/how-to-check-if-a-string-startswith-another-string
+// stackoverflow.com/questions/646628/how-to-check-if-a-string-startswith-another-string
 try {
 	if (!String.prototype.startsWith) {
 		String.prototype.startsWith = function(str) {
@@ -23,6 +23,20 @@ try {
 	}
 } catch(ex) {
 	console.log("kiwi_util: String.prototype.startsWith");
+}
+
+// developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/endsWith
+try {
+   if (!String.prototype.endsWith) {
+      String.prototype.endsWith = function(search, this_len) {
+         if (this_len === undefined || this_len > this.length) {
+            this_len = this.length;
+         }
+           return this.substring(this_len - search.length, this_len) === search;
+      };
+   }
+} catch(ex) {
+	console.log("kiwi_util: String.prototype.endsWith");
 }
 
 var kiwi_iOS, kiwi_OSX, kiwi_android;
@@ -66,7 +80,8 @@ function kiwi_version_cb(response_obj)
 		if (el.VERSION_MAJ != version_maj || el.VERSION_MIN != version_min) {
 			if (kiwi_version_fail == false) {
 				s = 'Your browser is trying to use incorrect versions of the KiwiSDR Javascript files.<br>' +
-					'Please clear your browser cache and try again.<br><br>' +
+					'Please clear your browser cache and try again.<br>' +
+					'Or click the button below to continue anyway.<br><br>' +
 					'v'+ version_maj +'.'+ version_min +': KiwiSDR server<br>';
 				kiwi_version_fail = true;
 			}
@@ -74,8 +89,16 @@ function kiwi_version_cb(response_obj)
 		}
 		//console.log('v'+ el.VERSION_MAJ +'.'+ el.VERSION_MIN +': '+ el.file);
 	});
-
+	
+	if (kiwi_version_fail)
+	   s += '<br>'+ w3_button('w3-css-yellow', 'Continue anyway', 'kiwi_version_continue_cb');
 	kiwi_bodyonload(s);
+}
+
+function kiwi_version_continue_cb()
+{
+   seriousError = false;
+	kiwi_bodyonload('');
 }
 
 function q(s)
@@ -108,6 +131,7 @@ function getFirstChars(buf, len)
    arrayBufferToStringLen(buf, len);
 }
 
+// NB: no error checking
 function kiwi_inet4_d2h(inet4_str)
 {
 	var s = inet4_str.split('.');
@@ -152,11 +176,21 @@ Number.prototype.leadingZeros = function(size)
 	return s;
 }
 
+// size is total number of digits, padded to the left with zeros
 String.prototype.leadingZeros = function(size)
 {
 	var s = String(this);
-	if (typeof(size) !== "number") size = 2;
-	while (s.length < size) s = "0"+s;
+	if (typeof(size) !== 'number') size = 2;
+	while (s.length < size) s = '0'+ s;
+	return s;
+}
+
+// size is total number of characters, padded to the left with spaces
+String.prototype.fieldWidth = function(size)
+{
+	var s = String(this);
+	if (typeof(size) !== 'number') return s;
+	while (s.length < size) s = ' '+ s;
 	return s;
 }
 
@@ -168,10 +202,20 @@ String.prototype.filterInt = function() {
 	return NaN;
 }
 
-Number.prototype.toHex = function()
+// pad with left zeros to 'digits' length
+// +digits: add leading '0x'
+// -digits: no leading '0x'
+Number.prototype.toHex = function(digits)
 {
+	if (typeof(digits) !== 'number') digits = 0;
+   var add_0x = (digits < 0)? 0:1;
+   digits = Math.abs(digits);
 	var n = Number(this);
-	return '0x'+(n>>>0).toString(16);
+	n = n >>> 0;   // make unsigned
+	var s = n.toString(16);
+	while (s.length < digits) s = '0'+ s;
+	if (add_0x) s = '0x'+ s;
+	return s;
 }
 
 Number.prototype.toUnits = function()
@@ -294,7 +338,7 @@ var kiwiint_dummy_elem = {};
 
 function html(id_or_name)
 {
-	var el = w3_el_id(id_or_name);
+	var el = w3_el(id_or_name);
 	var debug;
 	try {
 		debug = el.value;
@@ -372,31 +416,15 @@ function rgb(r, g, b)
 	return 'rgb('+ Math.floor(r) +','+ Math.floor(g) +','+ Math.floor(b) +')';
 }
 
-function visible_inline(id, v)
+function hsl(h, s, l)
 {
-	visible_type(id, v, 'inline');
-}
-
-function visible_block(id, v)
-{
-	visible_type(id, v, 'block');
-}
-
-function visible_inline_block(id, v)
-{
-	visible_type(id, v, 'inline-block');
-}
-
-function visible_table_cell(id, v)
-{
-	visible_type(id, v, 'table-cell');
-}
-
-function visible_type(id, v, type)
-{
-	var elem = html(id);
-	elem.style.display = v? type:'none';
-	if (v) elem.style.visibility = 'visible';
+   s = Math.floor(s);
+   if (s < 0) s = 0;
+   if (s > 100) s = 100;
+   l = Math.floor(l);
+   if (l < 0) l = 0;
+   if (l > 100) l = 100;
+	return 'hsl('+ Math.round(h) +','+ s +'%,'+ l +'%)';
 }
 
 // Get function from string, with or without scopes (by Nicolas Gauthier)
@@ -459,13 +487,15 @@ function kiwi_GETrequest(id, url)
   var uniqueString = id +'_'+ (new Date()).toUTCString().substr(17,8);
   document.body.appendChild(iframe);
   iframe.style.display = "none";
-  iframe.contentWindow.name = uniqueString;
+  iframe.contentWindow.name = uniqueString;  // link for form.target below
+  w3_add(iframe, 'id-kiwi_GETrequest');   // for benefit of browser inspector
 
   // construct a form with hidden inputs, targeting the iframe via the uniqueString
   var form = document.createElement("form");
-  form.target = uniqueString;
+  form.target = uniqueString;    // link to iframe.contentWindow.name above
   form.action = url;
   form.method = "GET";
+  w3_add(form, 'id-kiwi_GETrequest');  // for benefit of browser inspector
   
   if (kiwi_GETrequest_debug) console.log('kiwi_GETrequest: '+ uniqueString);
   return { iframe:iframe, form:form };
@@ -576,7 +606,7 @@ function kiwi_ajax_prim(method, data, url, callback, timeout)
 	
 	ajax.onerror = function(e) {
       dbug('XHR.onerror='+ e);
-      console.log(e);
+      //console.log(e);
 	}
 
 	ajax.onreadystatechange = function() {
@@ -769,6 +799,25 @@ var sendmail = function (to, subject) {
 	window.location.href = s;
 }
 
+function line_stroke(ctx, vert, linew, color, x1,y1,x2,y2)
+{
+	/*
+	ctx.lineWidth = linew;
+	ctx.strokeStyle = color;
+	ctx.beginPath();
+	ctx.moveTo(x1, y1);
+	ctx.lineTo(x2, y2);
+	ctx.stroke();
+	*/
+	var lineh = Math.floor(linew/2);
+	var w = vert? linew : x2 - x1 + 1;
+	var h = vert? y2 - y1 + 1 : linew;
+	var x = x1 - (vert? lineh : 0);
+	var y = y1 - (vert? 0 : lineh);
+	ctx.fillStyle = color;
+	ctx.fillRect(x,y,w,h);
+}
+
 
 ////////////////////////////////
 // web sockets
@@ -793,7 +842,7 @@ function msg_send(s)
          return -1;
       }
    }
-   console.log('### msg_send: NO WS <'+ s +'>');
+   //console.log('### msg_send: NO WS <'+ s +'>');
    return -1;
 }
 
@@ -807,7 +856,15 @@ function open_websocket(stream, open_cb, open_cb_param, msg_cb, recv_cb, error_c
 
 	// replace http:// with ws:// on the URL that includes the port number
 	var ws_url = kiwi_url_origin().split("://")[1];
-	ws_url = 'ws://'+ ws_url +'/'+ timestamp +'/'+ stream;
+	
+	// evaluate ws protocol
+	var ws_protocol = 'ws://';
+
+	if(window.location.protocol === "https:"){
+		ws_protocol = 'wss://';
+	}
+	
+	ws_url = ws_protocol + ws_url +'/'+ timestamp +'/'+ stream;
 	
 	//console.log('open_websocket '+ ws_url);
 	var ws = new WebSocket(ws_url);
@@ -868,6 +925,9 @@ function on_ws_recv(evt, ws)
 		return;
 	}
 
+	if (seriousError)
+	   return;        // don't go any further
+
 	//var s = arrayBufferToString(data);
 	//if (ws.stream == 'EXT') console.log('on_ws_recv: <'+ s +'>');
 
@@ -885,7 +945,8 @@ function on_ws_recv(evt, ws)
 		var stringData = arrayBufferToString(data);
 		params = stringData.substring(4).split(" ");
 	
-		//if (ws.stream == 'EXT') console.log('>>> '+ ws.stream +': msg_cb='+ (typeof ws.msg_cb) +' '+ params.length +' '+ stringData);
+		//if (ws.stream == 'EXT')
+		//console.log('>>> '+ ws.stream +': msg_cb='+ (typeof ws.msg_cb) +' '+ params.length +' '+ stringData);
 		for (var i=0; i < params.length; i++) {
 			param = params[i].split("=");
 			
@@ -895,7 +956,8 @@ function on_ws_recv(evt, ws)
 			}
 			
 			if (kiwi_msg(param, ws) == false && ws.msg_cb) {
-				//if (ws.stream == 'EXT') console.log('>>> '+ ws.stream + ': msg_cb='+ (typeof ws.msg_cb) +' '+ params[i]);
+				//if (ws.stream == 'EXT')
+				//console.log('>>> '+ ws.stream + ': not kiwi_msg: msg_cb='+ (typeof ws.msg_cb) +' '+ params[i]);
 				ws.msg_cb(param, ws);
 			}
 		}
@@ -928,4 +990,3 @@ window.onbeforeunload = function() {
 		}
 	}
 };
-

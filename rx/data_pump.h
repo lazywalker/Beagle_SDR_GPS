@@ -43,7 +43,7 @@ struct rx_dpump_t {
 		u4_t wr_pos, rd_pos;
 		// array size really NRX_SAMPS but made pow2 FASTFIR_OUTBUF_SIZE for indexing efficiency
 		TYPECPX in_samps[N_DPBUF][FASTFIR_OUTBUF_SIZE];
-		u2_t ticks[N_DPBUF][3];
+		u64_t ticks[N_DPBUF];
 		#ifdef SND_SEQ_CHECK
 		    u4_t in_seq[N_DPBUF];
 		#endif
@@ -77,12 +77,8 @@ extern rx_dpump_t rx_dpump[RX_CHANS];
 extern u4_t dpump_resets, dpump_hist[NRX_BUFS];
 
 extern int rx_adc_ovfl;
-extern bool rx_dpump_run;
 
-enum rx_chan_action_e {RX_CHAN_ENABLE, RX_CHAN_DISABLE, RX_CHAN_FREE };
-	
+void data_pump_start_stop();
 void data_pump_init();
-void rx_enable(int chan, rx_chan_action_e action);
-int rx_chan_free(int *idx);
 
 #endif

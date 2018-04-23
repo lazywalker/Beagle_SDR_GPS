@@ -16,11 +16,11 @@
 #include <unistd.h>
 #include <ctype.h>
 
-#define SPI_RFI_TEST
+//#define SPI_RFI_TEST
 
 bool background_mode = FALSE;
 
-bool adc_clock_enable = FALSE;
+bool adc_clock_enable = TRUE;
 
 static SPI_MOSI code, zeros;
 static SPI_MISO readback;
@@ -163,14 +163,9 @@ void fpga_init() {
 		xit(-1);
 	}
 
-	spi_get_noduplex(CmdGetStatus, &ping, 2);
-	union {
-		u2_t word;
-		struct {
-			u2_t fpga_id:4, clock_id:4, fpga_ver:4, fw_id:3, ovfl:1;
-		};
-	} stat;
-	stat.word = ping.word[0];
+	stat_reg_t stat = stat_get();
+	//printf("stat.word=0x%04x fw_id=0x%x fpga_ver=0x%x stat_user=0x%x fpga_id=0x%x\n",
+	//    stat.word, stat.fw_id, stat.fpga_ver, stat.stat_user, stat.fpga_id);
 
 	if (stat.fpga_id != FPGA_ID) {
 		lprintf("FPGA ID %d, expecting %d\n", stat.fpga_id, FPGA_ID);
@@ -186,15 +181,5 @@ void fpga_init() {
 	if (stat.fpga_ver != FPGA_VER) {
 		lprintf("\tbut expecting %d\n", FPGA_VER);
 		panic("mismatch");
-	}
-	
-	switch (stat.clock_id) {
-	
-	case 0:
-		adc_clock_enable = TRUE;
-		break;
-
-	default:
-		panic("FPGA returned bad clock select");
 	}
 }

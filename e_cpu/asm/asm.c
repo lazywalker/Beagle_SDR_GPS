@@ -59,7 +59,7 @@ dict_t dict[] = {
 	{ "FACTOR",		TT_PRE,		PP_FACTOR },
 	{ "ENDF",		TT_PRE,		PP_ENDF },
 	{ "FCALL",		TT_PRE,		PP_FCALL },
-	{ "#if",		TT_PRE,		PP_IF },			// supports '#if NUM' and '#if SYM'
+	{ "#if",		TT_PRE,		PP_IF },			// supports '#if NUM (implied != 0)' and '#if SYM (implied != 0)' and '#if SYM (implied ==) NUM'
 	{ "#else",		TT_PRE,		PP_ELSE },
 	{ "#endif",		TT_PRE,		PP_ENDIF },
 
@@ -77,6 +77,7 @@ dict_t dict[] = {
 	{ "add",		TT_OPC,		OC_ADD },
 	{ "sub",		TT_OPC,		OC_SUB },
 	{ "mult",		TT_OPC,		OC_MULT },
+	{ "mult18",		TT_OPC,		OC_MULT18 },
 	{ "and",		TT_OPC,		OC_AND },
 	{ "or",			TT_OPC,		OC_OR },
 //	{ "xor",		TT_OPC,		OC_XOR },
@@ -170,7 +171,7 @@ int main(int argc, char *argv[])
 	char *ofs = "ecode.aout.h";						// included by simulator
 		  hfs = "../" FN_PREFIX ".gen.h";			// included by .cpp / .c
 		  vfs = "../verilog/" FN_PREFIX ".gen.vh";	// included by verilog
-		  cfs = "../verilog/" FN_PREFIX ".coe";		// .coe file to init BRAMs
+		  cfs = "../verilog/" FN_PREFIX ".coe";		// .coe file to init BRAMs (optional during FPGA development)
 
 	int ifn;
 	FILE *ifp[NIFILES_NEST], *ofp, *hfp, *vfp, *cfp;
@@ -250,7 +251,9 @@ int main(int argc, char *argv[])
 						tp->flags |= TF_FIELD; cp++;
 						syntax(*cp == 'd', "expecting \'d"); cp++;
 						tp->width = num;
+						int max = (1 << num) - 1;
 						num = strtol(cp, &cp, 0);
+						syntax(num <= max, "value greater than field width");
 					}
 					tp->num = num; tp++; continue;
 				}
@@ -381,11 +384,19 @@ int main(int argc, char *argv[])
 				keep[ifdef_lvl] = 0;
 			} else
 			if ((tp+1)->ttype == TT_NUM) {
-				keep[ifdef_lvl] = (tp+1)->num;
+				keep[ifdef_lvl] = ((tp+1)->num != 0);
 			} else
 			if ((tp+1)->ttype == TT_SYM) {
 				if ((p = pre((tp+1)->str, PP_DEF))) {
-					keep[ifdef_lvl] = p->val;
+			        if ((tp+2)->ttype == TT_NUM) {      // #if SYM (implied ==) NUM
+			            int sym_equals_num = (p->val == (tp+2)->num);
+					    keep[ifdef_lvl] = sym_equals_num;
+                        if (debug) printf("#if SYM (%s=%d) == %d? %s\n",
+                            (tp+1)->str, p->val, (tp+2)->num, sym_equals_num? "T":"F");
+			        } else {
+					    keep[ifdef_lvl] = (p->val != 0);
+                        if (debug) printf("#if SYM %s=%d\n", (tp+1)->str, p->val);
+					}
 				} else {
 					keep[ifdef_lvl] = 0;
 				}
@@ -784,6 +795,7 @@ int main(int argc, char *argv[])
 			if (t->ttype == TT_NUM) {
 				val = t->num, operand_type=1;
 			}
+		    // FIXME: doesn't catch missing label value (i.e. pointer to code that is undefined)
 			if ((t->ttype == TT_SYM) && ((st = string_find(t->str)) && (st->flags & SF_DEFINED))) {
 				val = st->val, operand_type=2;
 			}
@@ -843,7 +855,7 @@ int main(int argc, char *argv[])
 			// check operand
 			switch (oc) {
 				case OC_PUSH:	syntax(oper >= 0 && oper < 0x8000, "constant outside range 0..0x7fff"); break;
-				case OC_ADDI:	syntax(oper >= 0 && oper < 128, "constant outside range 0..127"); break;
+				case OC_ADDI:	syntax(oper >= 0 && oper <= 127, "constant outside range 0..127"); break;
 				case OC_CALL:
 				case OC_BR:
 				case OC_BRZ:

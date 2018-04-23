@@ -22,14 +22,16 @@ Boston, MA  02110-1301, USA.
 #include "types.h"
 #include "kiwi.h"
 #include "jsmn.h"
+#include "coroutines.h"
 
 // configuration
 
 struct cfg_t {
-	bool init;
+	bool init, init_load;
+	lock_t lock;    // FIXME: now that parsing the dx list is yielding probably need to lock
 	const char *filename;
 
-	char *json;
+	char *json, *json_write;
 	int json_buf_size;		// includes terminating null
 
 	int tok_size, ntok;
@@ -46,6 +48,7 @@ extern cfg_t cfg_cfg, cfg_adm, cfg_dx;
 #define CFG_REMOVE		0x0020
 #define CFG_COPY		0x0040
 #define CFG_CHANGE		0x0080
+#define CFG_NO_DOT		0x0100
 
 #define CFG_LOOKUP_LVL1 ((jsmntok_t *) -1)
 
@@ -134,15 +137,20 @@ extern cfg_t cfg_cfg, cfg_adm, cfg_dx;
 
 // process JSON from a buffer
 #define json_init(cfg, json)				_cfg_init(cfg, json)
+
 #define json_int(cfg, name, err, flags)		_cfg_int(cfg, name, err, flags)
 #define json_set_int(cfg, name, val)		_cfg_set_int(cfg, name, val, CFG_SET, 0)
 #define json_rem_int(cfg, name)				_cfg_set_int(cfg, name, 0, CFG_REMOVE, 0)
+#define json_default_int(cfg, name, val, err) _cfg_default_int(cfg, name, val, err)
+
 #define json_float(cfg, name, err, flags)	_cfg_float(cfg, name, err, flags)
 #define json_set_float(cfg, name, val)		_cfg_set_float(cfg, name, val, CFG_SET, 0)
 #define json_rem_float(cfg, name)			_cfg_set_float(cfg, name, 0, CFG_REMOVE, 0)
+
 #define json_bool(cfg, name, err, flags)	_cfg_bool(cfg, name, err, flags)
 #define json_set_bool(cfg, name, val)		_cfg_set_bool(cfg, name, (u4_t) val, CFG_SET, 0)
 #define json_rem_bool(cfg, name)			_cfg_set_bool(cfg, name, 0, CFG_REMOVE, 0)
+
 #define json_string(cfg, name, err, flags)	_cfg_string(cfg, name, err, flags)
 #define json_string_free(cfg, val)			_cfg_free(cfg, val)
 #define json_set_string(cfg, name, val)		_cfg_set_string(cfg, name, val, CFG_SET, 0)
@@ -186,5 +194,5 @@ bool _cfg_float_json(cfg_t *cfg, jsmntok_t *jt, double *num);
 bool _cfg_type_json(cfg_t *cfg, jsmntype_t jt_type, jsmntok_t *jt, const char **str);
 void _cfg_free(cfg_t *cfg, const char *str);
 
-enum cfg_lookup_e { CFG_OPT_NONE, CFG_OPT_ID1, CFG_OPT_ID2 };
+enum cfg_lookup_e { CFG_OPT_NONE, CFG_OPT_ID1, CFG_OPT_ID2, CFG_OPT_NO_DOT };
 jsmntok_t *_cfg_lookup_json(cfg_t *cfg, const char *id, cfg_lookup_e option);

@@ -26,6 +26,9 @@
  */
 
 #include "wspr.h"
+#include "net.h"
+#include "web.h"
+#include "non_block.h"
 
 #ifndef EXT_WSPR
 	void wspr_main() {}
@@ -46,6 +49,8 @@
 #define	RUNNING		3
 #define	DECODING	4
 
+wspr_conf_t wspr_c;
+
 static wspr_t wspr[RX_CHANS];
 
 // assigned constants
@@ -54,15 +59,20 @@ int nffts, nbins_411, hbins_205;
 // computed constants
 static float window[NFFT];
 
-// loaded from admin configuration
-int bfo;
-
 const char *status_str[] = { "none", "idle", "sync", "running", "decoding" };
 
 static void wspr_status(wspr_t *w, int status, int resume)
 {
 	wprintf("WSPR RX%d wspr_status: set status %d-%s\n", w->rx_chan, status, status_str[status]);
-	ext_send_msg(w->rx_chan, WSPR_DEBUG_MSG, "EXT WSPR_STATUS=%d", status);
+
+    // Send server time to client since that's what sync is based on.
+    // Send on each status change to eliminate effects of browser host clock drift.
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    u4_t msec = ts.tv_nsec/1000000;
+	ext_send_msg(w->rx_chan, WSPR_DEBUG_MSG, "EXT WSPR_STATUS=%d WSPR_TIME_MSEC=%d=%d",
+	    status, ts.tv_sec, msec);
+
 	w->status = status;
 	if (resume != NONE) {
 		wprintf("WSPR RX%d wspr_status: will resume to %d-%s\n", w->rx_chan, resume, status_str[resume]);
@@ -218,6 +228,20 @@ void WSPR_Deco(void *param)
 			wprintf("decoder aborted\n");
 	
 		wspr_status(w, w->status_resume, NONE);
+		
+		if (w->autorun) {
+		    // send wsprstat on startup and every 6 minutes thereafter
+		    u4_t now = timer_sec();
+		    if (now - w->arun_last_status_sent > MINUTES_TO_SEC(6)) {
+		        w->arun_last_status_sent = now;
+                //printf("%s\n", w->arun_stat_cmd);
+                non_blocking_cmd_system_child("kiwi.wsp", w->arun_stat_cmd, NO_WAIT);
+		    }
+		    if (w->arun_decoded > w->arun_last_decoded) {
+		        input_msg_internal(w->arun_csnd, (char *) "SET geo=%d%%20decoded", w->arun_decoded);
+		        w->arun_last_decoded = w->arun_decoded;
+            }
+		}
     }
 }
 
@@ -384,8 +408,7 @@ bool wspr_msgs(char *msg, int rx_chan)
 	
 	if (strcmp(msg, "SET ext_server_init") == 0) {
 		w->rx_chan = rx_chan;
-		time_t t; time(&t);
-		ext_send_msg(w->rx_chan, WSPR_DEBUG_MSG, "EXT nbins=%d WSPR_TIME=%d ready", nbins_411, t);
+		ext_send_msg(w->rx_chan, WSPR_DEBUG_MSG, "EXT nbins=%d ready", nbins_411);
 		wspr_status(w, IDLE, IDLE);
 		return true;
 	}
@@ -399,9 +422,9 @@ bool wspr_msgs(char *msg, int rx_chan)
 		return true;
 	}
 
-	n = sscanf(msg, "SET BFO=%d", &bfo);
+	n = sscanf(msg, "SET BFO=%d", &wspr_c.bfo);
 	if (n == 1) {
-		wprintf("WSPR BFO %d --------------------------------------------------------------\n", bfo);
+		wprintf("WSPR BFO %d --------------------------------------------------------------\n", wspr_c.bfo);
 		return true;
 	}
 
@@ -414,6 +437,11 @@ bool wspr_msgs(char *msg, int rx_chan)
 		wprintf("WSPR dialfreq_MHz %.6f cf_offset %.0f -------------------------------------------\n", w->dialfreq_MHz, w->cf_offset);
 		return true;
 	}
+	
+	if (strcmp(msg, "SET autorun") == 0) {
+	    w->autorun = true;
+	    return true;
+	}
 
 	n = sscanf(msg, "SET capture=%d", &w->capture);
 	if (n == 1) {
@@ -423,10 +451,6 @@ bool wspr_msgs(char *msg, int rx_chan)
 				w->WSPR_DecodeTask_id = CreateTaskF(WSPR_Deco, 0, EXT_PRIORITY, CTF_RX_CHANNEL | (rx_chan & CTF_CHANNEL), 0);
 				w->create_tasks = true;
 			}
-			
-			// send server time to client since that's what sync is based on
-			time_t t; time(&t);
-			ext_send_msg(w->rx_chan, WSPR_DEBUG_MSG, "EXT WSPR_TIME=%d", t);
 			
 			w->send_error = false;
 			w->reset = TRUE;
@@ -443,6 +467,69 @@ bool wspr_msgs(char *msg, int rx_chan)
 	}
 	
 	return false;
+}
+
+static double wspr_cfs[] = {
+    137.5, 475.7, 1838.1, 3570.1, 3594.1, 5288.7, 5366.2, 7040.1, 10140.2, 14097.1, 18106.1, 21096.1, 24926.1, 28126.1
+};
+
+static struct mg_connection wspr_snd_mc[RX_CHANS], wspr_ext_mc[RX_CHANS];
+
+void wspr_autorun(int which, int idx)
+{
+	#define WSPR_BFO 750
+	#define WSPR_FILTER_BW 300
+	double center_freq_kHz = wspr_cfs[idx-1];
+    double dial_freq_kHz = center_freq_kHz - WSPR_BFO/1e3;
+	double cfo = roundf((center_freq_kHz - floorf(center_freq_kHz)) * 1e3);
+	
+    struct mg_connection *mc;
+    
+    mc = &wspr_snd_mc[which];
+    mc->connection_param = NULL;
+    asprintf((char **) &mc->uri, "%d/SND", 1138+which);
+    kiwi_strncpy(mc->remote_ip, "127.0.0.1", NET_ADDRSTRLEN);
+    mc->remote_port = mc->local_port = ddns.port;
+    conn_t *csnd = rx_server_websocket(WS_INTERNAL_CONN, mc);
+    if (csnd == NULL) return;
+
+    int chan = csnd->rx_channel;
+    wspr_t *w = &wspr[chan];
+    w->arun_csnd = csnd;
+    w->arun_cf_MHz = center_freq_kHz / 1e3;
+    w->arun_last_decoded = -1;
+
+	printf("wspr_autorun: which=%d RX%d idx=%d cf=%.2f df=%.2f cfo=%.0f\n", which, chan, idx, center_freq_kHz, dial_freq_kHz, cfo);
+
+    input_msg_internal(csnd, (char *) "SET auth t=kiwi p=");
+	input_msg_internal(csnd, (char *) "SET AR OK in=12000 out=44100");
+	input_msg_internal(csnd, (char *) "SET agc=1 hang=0 thresh=-100 slope=6 decay=1000 manGain=50");
+    input_msg_internal(csnd, (char *) "SET mod=usb low_cut=%d high_cut=%d freq=%.2f",
+        WSPR_BFO - WSPR_FILTER_BW/2, WSPR_BFO + WSPR_FILTER_BW/2, dial_freq_kHz);
+    input_msg_internal(csnd, (char *) "SET ident_user=WSPR-autorun");
+    input_msg_internal(csnd, (char *) "SET geo=0%%20decoded");
+
+    mc = &wspr_ext_mc[which];
+    mc->connection_param = NULL;
+    asprintf((char **) &mc->uri, "%d/EXT", 1138+which);
+    kiwi_strncpy(mc->remote_ip, "127.0.0.1", NET_ADDRSTRLEN);
+    mc->remote_port = mc->local_port = ddns.port;
+    conn_t *cext = rx_server_websocket(WS_INTERNAL_CONN, mc);
+    
+    input_msg_internal(cext, (char *) "SET auth t=kiwi p=");
+    input_msg_internal(cext, (char *) "SET ext_switch_to_client=wspr first_time=1 rx_chan=%d", chan);
+    input_msg_internal(cext, (char *) "SET autorun");
+    input_msg_internal(cext, (char *) "SET BFO=%d", WSPR_BFO);
+    input_msg_internal(cext, (char *) "SET capture=0");
+    input_msg_internal(cext, (char *) "SET dialfreq=%.2f cf_offset=%.0f", dial_freq_kHz, cfo);
+    input_msg_internal(cext, (char *) "SET reporter_grid=RF82ci");
+    input_msg_internal(cext, (char *) "SET capture=1");
+
+    asprintf(&w->arun_stat_cmd, "curl 'http://wsprnet.org/post?function=wsprstat&rcall=%s&rgrid=%s&rqrg=%.6f&tpct=0&tqrg=%.6f&dbm=0&version=1.3+Kiwi' >/dev/null 2>&1",
+        wspr_c.rcall, wspr_c.rgrid, w->arun_cf_MHz, w->arun_cf_MHz);
+    //printf("%s\n", w->arun_stat_cmd);
+    non_blocking_cmd_system_child("kiwi.wsp", w->arun_stat_cmd, NO_WAIT);
+    w->arun_last_status_sent = timer_sec();
 }
 
 void wspr_main();
@@ -466,8 +553,6 @@ void wspr_main()
     nbins_411 = ceilf(NFFT * BW_MAX / FSRATE) +1;
     hbins_205 = (nbins_411-1)/2;
 
-    wspr_init();
-
 	for (i=0; i < RX_CHANS; i++) {
 		wspr_t *w = &wspr[i];
 		memset(w, 0, sizeof(wspr_t));
@@ -487,6 +572,8 @@ void wspr_main()
 		w->send_error = false;
 	}
 	
+    wspr_init();
+
 	for (i=0; i < NFFT; i++) {
 		window[i] = sin(i * K_PI/(NFFT-1));
 	}
@@ -497,8 +584,6 @@ void wspr_main()
     int_decimate = SND_RATE / FSRATE;
     wprintf("WSPR %s decimation: srate=%.6f/%d decim=%.6f/%d sps=%d NFFT=%d nbins_411=%d\n", FRACTIONAL_DECIMATION? "fractional" : "integer",
         frate, SND_RATE, fdecimate, int_decimate, SPS, NFFT, nbins_411);
-    
-    //int autorun = cfg_int("WSPR.autorun", NULL, CFG_REQUIRED);
 }
 
 #endif

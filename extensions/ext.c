@@ -138,6 +138,8 @@ void ext_register(ext_t *ext)
 {
 	check(n_exts < N_EXT);
 	ext_list[n_exts] = ext;
+	if (strcmp(ext->name, "ant_switch") == 0)
+	    have_ant_switch_ext = true;
 	printf("ext_register: #%d \"%s\"\n", n_exts, ext->name);
 	n_exts++;
 }
@@ -152,7 +154,7 @@ int ext_send_msg(int rx_chan, bool debug, const char *msg, ...)
 	va_start(ap, msg);
 	vasprintf(&s, msg, ap);
 	va_end(ap);
-	if (debug) printf("ext_send_msg: RX%d-%p <%s>\n", rx_chan, conn, s);
+	if (debug) printf("ext_send_msg: RX%d(%p) <%s>\n", rx_chan, conn, s);
 	send_msg_buf(conn, s, strlen(s));
 	free(s);
 	return 0;
@@ -161,7 +163,7 @@ int ext_send_msg(int rx_chan, bool debug, const char *msg, ...)
 int ext_send_msg_data(int rx_chan, bool debug, u1_t cmd, u1_t *bytes, int nbytes)
 {
 	conn_t *conn = ext_users[rx_chan].conn_ext;
-	if (debug) printf("ext_send_msg_data: RX%d-%p cmd %d nbytes %d\n", rx_chan, conn, cmd, nbytes);
+	if (debug) printf("ext_send_msg_data: RX%d(%p) cmd %d nbytes %d\n", rx_chan, conn, cmd, nbytes);
 	if (!conn) return -1;
 	send_msg_data(conn, SM_NO_DEBUG, cmd, bytes, nbytes);
 	return 0;
@@ -229,11 +231,21 @@ char *extint_list_js()
 	sb = NULL;
 	for (i=0; i < n_exts; i++) {
 		ext_t *ext = ext_list[i];
+		//asprintf(&sb2, "<script>alert('%s.js');</script>\n", ext->name);
+		//sb = kstr_cat(sb, kstr_wrap(sb2));
 		asprintf(&sb2, "<script src=\"extensions/%s/%s.js\"></script>\n", ext->name, ext->name);
 		sb = kstr_cat(sb, kstr_wrap(sb2));
+		
+		for (const char **fp = ext->aux_files; *fp != NULL; fp++) {
+            asprintf(&sb2, "<script src=\"extensions/%s/%s\"></script>\n", ext->name, *fp);
+            sb = kstr_cat(sb, kstr_wrap(sb2));
+		}
+		
 		asprintf(&sb2, "<link rel=\"stylesheet\" type=\"text/css\" href=\"extensions/%s/%s.css\" />\n", ext->name, ext->name);
 		sb = kstr_cat(sb, kstr_wrap(sb2));
 	}
+    //asprintf(&sb2, "<script>alert('exts done');</script>\n");
+    //sb = kstr_cat(sb, kstr_wrap(sb2));
 
 	return sb;
 }
@@ -295,7 +307,7 @@ void extint_c2s(void *param)
 				continue;
 			
 			ext_rx_chan = conn_ext->ext_rx_chan;
-			//printf("extint_c2s: %s CONN%d-%p RX%d-%p %d <%s>\n", conn_ext->ext? conn_ext->ext->name:"?", conn_ext->self_idx, conn_ext, ext_rx_chan, (ext_rx_chan == -1)? 0:ext_users[ext_rx_chan].conn_ext, strlen(cmd), cmd);
+			//printf("extint_c2s: %s CONN%d(%p) RX=%d(%p) %d <%s>\n", conn_ext->ext? conn_ext->ext->name:"?", conn_ext->self_idx, conn_ext, ext_rx_chan, (ext_rx_chan == -1)? 0:ext_users[ext_rx_chan].conn_ext, strlen(cmd), cmd);
 
 			// answer from client ext about who they are
 			// match against list of known extensions and register msg handler
@@ -307,7 +319,7 @@ void extint_c2s(void *param)
 				for (i=0; i < n_exts; i++) {
 					ext = ext_list[i];
 					if (strcmp(client_m, ext->name) == 0) {
-						//printf("ext_switch_to_client: found func %p CONN%d-%p for ext %s RX%d\n", ext->receive_msgs, conn_ext->self_idx, conn_ext, client_m, rx_chan);
+						//printf("ext_switch_to_client: found func %p CONN%d(%p) for ext %s RX%d\n", ext->receive_msgs, conn_ext->self_idx, conn_ext, client_m, rx_chan);
                         ext_users_t *eusr = &ext_users[rx_chan];
                         eusr->valid = TRUE;
 						eusr->ext = ext;
@@ -352,24 +364,24 @@ void extint_c2s(void *param)
 
 			ext_rx_chan = conn_ext->ext_rx_chan;
 			if (ext_rx_chan == -1) {
-				printf("### extint_c2s: %s CONN%d-%p ext_rx_chan == -1?\n", conn_ext->ext? conn_ext->ext->name:"?", conn_ext->self_idx, conn_ext);
+				printf("### extint_c2s: %s CONN%d(%p) ext_rx_chan == -1?\n", conn_ext->ext? conn_ext->ext->name:"?", conn_ext->self_idx, conn_ext);
 				continue;
 			}
 			ext = ext_users[ext_rx_chan].ext;
 			if (ext == NULL) {
-				printf("### extint_c2s: %s CONN%d-%p ext_rx_chan %d ext NULL?\n", conn_ext->ext? conn_ext->ext->name:"?", conn_ext->self_idx, conn_ext, ext_rx_chan);
+				printf("### extint_c2s: %s CONN%d(%p) ext_rx_chan %d ext NULL?\n", conn_ext->ext? conn_ext->ext->name:"?", conn_ext->self_idx, conn_ext, ext_rx_chan);
 				continue;
 			}
 			if (ext->receive_msgs) {
-				//printf("extint_c2s: %s ext->receive_msgs() %p CONN%d-%p RX%d-%p %d <%s>\n", conn_ext->ext? conn_ext->ext->name:"?", ext->receive_msgs, conn_ext->self_idx, conn_ext, ext_rx_chan, (ext_rx_chan == -1)? 0:ext_users[ext_rx_chan].conn_ext, strlen(cmd), cmd);
+				//printf("extint_c2s: %s ext->receive_msgs() %p CONN%d(%p) RX%d(%p) %d <%s>\n", conn_ext->ext? conn_ext->ext->name:"?", ext->receive_msgs, conn_ext->self_idx, conn_ext, ext_rx_chan, (ext_rx_chan == -1)? 0:ext_users[ext_rx_chan].conn_ext, strlen(cmd), cmd);
 				if (ext->receive_msgs(cmd, ext_rx_chan))
 					continue;
 			} else {
-				printf("### extint_c2s: %s CONN%d-%p RX%d-%p ext->receive_msgs == NULL?\n", conn_ext->ext? conn_ext->ext->name:"?", conn_ext->self_idx, conn_ext, ext_rx_chan, (ext_rx_chan == -1)? 0:ext_users[ext_rx_chan].conn_ext);
+				printf("### extint_c2s: %s CONN%d(%p) RX%d(%p) ext->receive_msgs == NULL?\n", conn_ext->ext? conn_ext->ext->name:"?", conn_ext->self_idx, conn_ext, ext_rx_chan, (ext_rx_chan == -1)? 0:ext_users[ext_rx_chan].conn_ext);
 				continue;
 			}
 			
-			printf("extint_c2s: %s CONN%d-%p unknown command: sl=%d %d|%d|%d [%s] ip=%s ==================================\n",
+			printf("extint_c2s: %s CONN%d(%p) unknown command: sl=%d %d|%d|%d [%s] ip=%s ==================================\n",
 			    conn_ext->ext? conn_ext->ext->name:"?", conn_ext->self_idx, conn_ext,
 			    strlen(cmd), cmd[0], cmd[1], cmd[2], cmd, conn_ext->remote_ip);
 
@@ -377,7 +389,7 @@ void extint_c2s(void *param)
 		}
 		
 		conn_ext->keep_alive = timer_sec() - ka_time;
-		bool keepalive_expired = (conn_ext->keep_alive > KEEPALIVE_SEC);
+		bool keepalive_expired = (!conn_ext->internal_connection && conn_ext->keep_alive > KEEPALIVE_SEC);
 		if (keepalive_expired || conn_ext->kick) {
 			ext_rx_chan = conn_ext->ext_rx_chan;
 			ext = (ext_rx_chan == -1)? NULL : ext_users[ext_rx_chan].ext;

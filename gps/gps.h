@@ -31,41 +31,56 @@
 #include <math.h>
 
 // select debugging
-//#define PRN_LIST
-//#define FOLLOW_NAV
-//#define PRN_LIST
-
-#define MAX(a,b) ((a)>(b)?(a):(b))
-#define MIN(a,b) ((a)<(b)?(a):(b))
+//#define TEST_VECTOR
+#define	QUIET
 
 void gps_main(int argc, char *argv[]);
 
 ///////////////////////////////////////////////////////////////////////////////
 // Frequencies
 
-#define DECIM_DEF	16	// gives a roughly 4ms FFT runtime needed for data pump latency reasons
-
-#define	MIN_SIG_DECIM		16
-#define	MIN_SIG_NO_DECIM	75
-
-#define	QUIET
-
 // SE4150L
 #define FC 4.092e6		// Carrier @ 2nd IF
 #define FS 16.368e6		// Sampling rate
 #define FS_I 16368000
 
-#define L1 1575.42e6	// L1 carrier
 #define CPS 1.023e6		// Chip rate
-#define BPS 50.0		// NAV data rate
+#define CPS_I 1023000
+
+#define L1_f 1575.42e6  // L1 carrier
+#define L1_CODE_PERIOD (L1_CODELEN*1000/CPS_I)
+#define L1_BPS 50.0     // NAV data rate
+
+#define E1B_f 1575.42e6 // E1B carrier
+#define E1B_CODE_PERIOD (E1B_CODELEN*1000/CPS_I)
+#define E1B_BPS 250.0   // NAV data rate
 
 ///////////////////////////////////////////////////////////////////////////////
 // Parameters
 
-#define	BIN_SIZE	250		// Hz, 4 ms
-#define FFT_LEN  	(FS_I/BIN_SIZE)
-#define NSAMPLES  	(FS_I/BIN_SIZE)
-#define NUM_SATS    32
+#define	MIN_SIG     16
+
+#define DECIM       4
+//#define DECIM       8
+#define SAMPLE_RATE (FS_I / DECIM)
+
+#define GPS_FFT_POW2 1
+//#define GPS_FFT_POW2 0
+#if GPS_FFT_POW2
+    const float BIN_SIZE = 249.755859375;     // Hz, 4 ms
+
+    #if __GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 9)
+     const int   FFT_LEN  = FS_I/BIN_SIZE/DECIM;
+     const int   NSAMPLES = FS_I/BIN_SIZE;
+    #else
+     #define FFT_LEN  	(65536/DECIM)   // (FS_I/BIN_SIZE/DECIM)
+     #define NSAMPLES  	65536           // (FS_I/BIN_SIZE)
+    #endif
+#else
+    #define	BIN_SIZE	250		// Hz, 4 ms
+    #define FFT_LEN  	(FS_I/BIN_SIZE/DECIM)
+    #define NSAMPLES  	(FS_I/BIN_SIZE)
+#endif
 
 ///////////////////////////////////////////////////////////////////////////////
 // Official GPS constants
@@ -79,6 +94,46 @@ const double C = 2.99792458e8; // Speed of light
 
 const double F = -4.442807633e-10; // -2*sqrt(MU)/pow(C,2)
 
+///////////////////////////////////////////////////////////////////////////////
+
+enum sat_e { Navstar, SBAS, QZSS, E1B };
+const char sat_s[sizeof(sat_e)] = { 'N', 'S', 'Q', 'E' };
+
+struct SATELLITE {
+    int prn;
+    union {
+        struct {
+            int T1, T2;
+        };
+        struct {
+            int G2_delay, G2_init;
+        };
+    };
+    sat_e type;
+    int sat;
+    char *prn_s;
+    bool busy;
+};
+
+#define is_Navstar(sat)     (Sats[sat].type == Navstar)
+#define is_SBAS(sat)        (Sats[sat].type == SBAS)
+#define is_QZSS(sat)        (Sats[sat].type == QZSS)
+#define is_E1B(sat)         (Sats[sat].type == E1B)
+
+#define MAX_SATS    60
+
+extern SATELLITE Sats[];
+
+#define G2_INIT     0x400
+
+#define NUM_NAVSTAR_SATS    32
+
+#define NUM_E1B_SATS    50
+
+extern u2_t E1B_code16[NUM_E1B_SATS][I_DIV_CEIL(E1B_CODELEN, 16)];
+
+#define PRN(sat)        (Sats[sat].prn_s)
+
 //////////////////////////////////////////////////////////////
 // Search
 
@@ -86,8 +141,7 @@ void SearchInit();
 void SearchFree();
 void SearchTask(void *param);
 bool SearchTaskRun();
-void SearchEnable(int sv);
-int  SearchCode(int sv, unsigned int g1);
+void SearchEnable(int ch, int sat, bool restart);
 void SearchParams(int argc, char *argv[]);
 
 //////////////////////////////////////////////////////////////
@@ -97,9 +151,9 @@ void SearchParams(int argc, char *argv[]);
 #define PARITY 6
 
 void ChanTask(void *param);
-int  ChanReset(void);
-void ChanStart(int ch, int sv, int t_sample, int taps, int lo_shift, int ca_shift);
-bool ChanSnapshot(int ch, uint16_t wpos, int *p_sv, int *p_bits, float *p_pwr);
+int  ChanReset(int sat, int codegen_init);
+void ChanStart(int ch, int sat, int t_sample, int lo_shift, int ca_shift, int snr);
+bool ChanSnapshot(int ch, uint16_t wpos, int *p_sat, int *p_bits, int *p_bits_tow, float *p_pwr);
 
 //////////////////////////////////////////////////////////////
 // Solution
@@ -110,7 +164,7 @@ void SolveTask(void *param);
 // User interface
 
 enum STAT {
-    STAT_PRN,
+    STAT_SAT,
     STAT_POWER,
     STAT_WDOG,
     STAT_SUB,
@@ -125,7 +179,12 @@ enum STAT {
     STAT_ACQUIRE,
     STAT_EPL,
     STAT_NOVFL,
-    STAT_DEBUG
+    STAT_DEBUG,
+    STAT_SOLN
+};
+
+struct azel_t {
+    int az, el;
 };
 
 struct gps_stats_t {
@@ -136,16 +195,59 @@ struct gps_stats_t {
 	int StatDay;    // 0 = Sunday
 	int StatNS, StatEW;
     signed delta_tLS, delta_tLSF;
+    bool include_alert_gps;
+    int soln, E1B_plot_separately;
 	
 	struct gps_chan_t {
-		int prn;
+		int sat;
 		int snr;
 		int rssi, gain;
 		int wdog;
-		int hold, ca_unlocked, parity;
+		int hold, ca_unlocked, parity, alert;
 		int sub, sub_renew;
-		int novfl;
+		int novfl, frames, par_errs;
+		int az, el;
+		int soln;
+		int ACF_mode;
 	} ch[GPS_CHANS];
+	
+	//#define AZEL_NSAMP (4*60)
+	#define AZEL_NSAMP 60
+	int az[AZEL_NSAMP][MAX_SATS];
+	int el[AZEL_NSAMP][MAX_SATS];
+	int last_samp;
+	
+	u4_t shadow_map[360];
+	azel_t qzs_3;
+	
+	int IQ_data_ch;
+	s2_t IQ_data[GPS_IQ_SAMPS_W];
+	u4_t IQ_seq_w, IQ_seq_r;
+
+	bool have_ref_lla;
+	float ref_lat, ref_lon, ref_alt;
+
+    #define WITHOUT_E1B 0
+    #define WITH_E1B 1
+    #define ONLY_E1B 2
+
+    #define GPS_NPOS 2
+    #define GPS_POS_SAMPS 64
+	struct gps_pos_t {
+	    int x, y;
+	    float lat, lon;
+	} POS_data[GPS_NPOS][GPS_POS_SAMPS];
+	u4_t POS_seq, POS_next, POS_len, POS_seq_w, POS_seq_r;
+	
+    #define GPS_NMAP 3
+    #define GPS_MAP_SAMPS 16
+	struct gps_map_t {
+	    u4_t seq;
+	    float lat, lon;
+	} MAP_data[GPS_NMAP][GPS_MAP_SAMPS];
+	u4_t MAP_next, MAP_len, MAP_seq_w, MAP_seq_r;
+	
+	int gps_gain, kick_lo_pll_ch;
 };
 
 extern gps_stats_t gps;
@@ -163,6 +265,7 @@ struct UMS {
 
 unsigned bin(char *s, int n);
 void StatTask(void *param);
+void GPSstat_init();
 void GPSstat(STAT st, double, int=0, int=0, int=0, int=0, double=0);
 
 #endif

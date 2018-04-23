@@ -6,6 +6,8 @@ if [ "$TERM" == "dumb" ]; then
   cd $PROJ
 fi
 
+alias bargs="function _bargs () { echo arg_one \$1 ; echo arg_two \$2 ; echo all_args \$* ; echo files_dirs * ; } ; _bargs"
+
 alias ls="function _ls () { /bin/ls \$COLOR -h \$* ; } ; _ls"
 alias la="function _la () { /bin/ls \$COLOR -lah \$* ; } ; _la"
 alias lb="function _lb () { /bin/ls \$COLOR -la \$* ; } ; _lb"
@@ -44,12 +46,8 @@ alias 4="pushd +4"
 alias 5="pushd +5"
 alias 6="pushd +6"
 alias ic="ifconfig"
-alias i="ic -a"
+alias i="ic -a; cat /etc/network/interfaces"
 alias df="/bin/df -h"
-alias g="function _g () { grep \$COLOR -riI --exclude-dir .git \$* . ; } ; _g"
-alias g.="function _gdot () { grep \$COLOR -iI --exclude-dir .git \$* * ; } ; _gdot"
-# note that only $* is required here (not \$*) perhaps due to use in built-in commands?
-alias ff='function _ff () { export ffa=$* ; find . -name "*$ffa*" -print ; } ; _ff'
 alias h="history"
 alias z="suspend"
 alias x="exit"
@@ -59,6 +57,8 @@ alias soc="source ~/.profile"
 alias pe="printenv"
 alias cdk="cd ~/kiwi.config"
 alias cdp="cd \${PROJ}"
+alias cd2="cd \${PROJ2}"
+alias cd3="cd \${PROJ3}"
 alias jc="journalctl"
 alias log="jc | tail -200"
 alias pubip="curl icanhazip.com; echo"
@@ -72,44 +72,69 @@ alias umsdr="umount /media/sd_root"
 alias cdsdr="cd /media/sd_root"
 alias sshrm="function _sshrm () { sudo ssh-keygen -R \$* ; ssh-keygen -R \$* ; } ; _sshrm"
 alias d+="function _d+ () { dig +short +noedns \$* A ; dig +short \$* AAAA ; } ; _d+"
+alias cata="tail -vn +1 *"
+alias du="/usr/bin/du -s -h *"
+alias ds="/usr/bin/du -s -h * | sort -hr"
+
+alias gr="grep \$COLOR"
+alias g="function _g () { gr -riI --exclude-dir .git \$* . ; } ; _g"
+alias gs="function _gs () { gr -rI --exclude-dir .git \$* . ; } ; _gs"
+alias g.="function _gdot () { gr -iI \$* * ; } ; _gdot"
+alias gt="function _gtail () { tail -n 300 -f \$2 | gr -i --line-buffered \$1 ; } ; _gtail"
+# note that only $* is required here (not \$*) perhaps due to use in built-in commands?
+alias ff='function _ff () { export ffa=$* ; find . -name "*$ffa*" -print ; } ; _ff'
 
 # file times in epoch seconds
 alias lss="ls -lah --time-style=+%s"
 alias dsec="function _dsec () { date --date=@\$* ; } ; _dsec"
 alias dfsec="function _dfsec () { date --date=@\$* ; } ; _dfsec"
 
-alias gbr="git branch"
+# which branch are we on?
+alias gbr="git branch -a"
+alias gcl="git clean -fd"
 alias gco="git checkout"
-alias gst="git status"
-alias gsh="git show"
-alias grem="git remote -v"
+alias gpu="git pull -v"
+alias grlocal="gcl; gco; gpu"
 alias gdi="git diff --no-color"
+alias gst="git status"
+alias gsh="git show --no-color"
+alias grem="git remote -v"
 alias gclone="function _gclone () { git clone https://github.com/jks-prv/\$1.git ; } ; _gclone"
+
+# git commits
+# current commit
+alias gcom="gsh --oneline -s"
+# list all commits <= current HEAD position
+alias gcoms="git log --no-color --oneline"
+# gco <sha>
+# gco master
 
 alias sc="echo systemctl: sctl scls=list_unit sclsa=list_all_units scs=service_status scsa/scst=start/stop scre=reload"
 alias sctl="function _sys () { systemctl \$* ; } ; _sys"
-alias scls="function _syg () { systemctl list-units | grep -i \$* ; systemctl list-unit-files | grep -i \$* ; } ; _syg"
+alias scls="function _syg () { systemctl list-units | gr -i \$* ; systemctl list-unit-files | gr -i \$* ; } ; _syg"
 alias sclsa="function _syg () { systemctl list-units ; systemctl list-unit-files ; } ; _syg"
 alias scs="function _sys () { systemctl --lines=100 status \${*}.service ; } ; _sys"
 alias scsa="function _sys () { systemctl --lines=100 start \${*}.service ; } ; _sys"
 alias scst="function _sys () { systemctl --lines=100 stop \${*}.service ; } ; _sys"
 alias scre="function _sys () { systemctl --lines=100 reload-or-restart \${*}.service ; } ; _sys"
+alias sa="service --status-all"
 
-alias pk="echo apt-get: s=search_available ls=list_installed i=install rm=remove au=autoremove up=update ug=upgrade c=clean sz=sizes f=which_pkg_has_file fu=file_update fi=files_installed"
+alias pk="echo apt: s=search_available ls=list_installed i=install rm=remove ar=autoremove up=update ug=upgrade c=clean sz=sizes f=which_pkg_has_file fu=file_update fi=files_installed co=cape_overlays"
 alias pks="echo available pkgs:; apt-cache search"
-alias pkls="echo installed pkgs:; dpkg -l | grep"
-alias pkup="apt-get update"
-alias pkug="apt-get upgrade"
-alias pki="apt-get -y install"
+alias pkls="echo installed pkgs:; dpkg -l | gr"
+alias pkup="apt update"
+alias pkug="apt -y upgrade"
+alias pki="apt -y install"
 alias pkc="df; apt-get clean; echo; df"
-alias pksz="dpkg-query -W -f='\${Installed-Size;8}\t\${Status;1}\t\${Package}\n' | grep -v '\\sd\\s' | sort -n | cut -f1,3-"
+alias pksz="dpkg-query -W -f='\${Installed-Size;8}\t\${Status;1}\t\${Package}\n' | gr -v '\\sd\\s' | sort -n | cut -f1,3-"
 alias pkf="apt-file search"
 alias pkfu="apt-file update"
 alias pkfg="apt-file upgrade"
 alias pkfi="dpkg -L"
 alias pkrm="apt-get purge"
 #alias pkrm="apt-get remove"
-alias pkau="apt-get autoremove"
+alias pkar="apt-get autoremove"
+alias pkco="apt upgrade bb-cape-overlays"
 
 # BBB
 alias dog="echo Debian `cat /etc/debian_version`; more /etc/dogtag; uname -a"

@@ -27,21 +27,10 @@
 
 enum SPI_CMD { // Embedded CPU commands, order must match 'Commands:' table in .asm code
 
-	// receiver
-    CmdSetRXFreq,
-    CmdSetRXNsamps,
-    CmdSetGen,
-    CmdSetGenAttn,
+    // general
     CmdPing,
     CmdLoad,
     CmdPing2,
-    CmdGetRX,
-    CmdClrRXOvfl,
-    CmdSetWFFreq,
-	CmdSetWFDecim,
-    CmdWFReset,
-    CmdGetWFSamples,
-    CmdGetWFContSamps,
     CmdCPUCtrClr,
     CmdGetCPUCtr,
     CmdCtrlSet,
@@ -52,41 +41,52 @@ enum SPI_CMD { // Embedded CPU commands, order must match 'Commands:' table in .
 	CmdFlush,
     CmdTestRead,
     CmdUploadStackCheck,
+    CmdGetSPRP,
+
+	// SDR
+#if RX_CHANS
+    CmdSetRXFreq,
+    CmdSetRXNsamps,
+    CmdSetGen,
+    CmdSetGenAttn,
+    CmdGetRX,
+    CmdClrRXOvfl,
+    CmdSetWFFreq,
+	CmdSetWFDecim,
+    CmdWFReset,
+    CmdGetWFSamples,
+    CmdGetWFContSamps,
+#endif
 
 	// GPS
+#if GPS_CHANS
     CmdSample,
     CmdSetMask,
-    CmdSetRateCA,
+    CmdSetRateCG,
     CmdSetRateLO,
-    CmdSetGainCA,
+    CmdSetGainCG,
     CmdSetGainLO,
-    CmdSetSV,
+    CmdSetSat,
+    CmdSetE1Bcode,
+    CmdSetPolarity,
     CmdPause,
     CmdGetGPSSamples,
     CmdGetChan,
     CmdGetClocks,
     CmdGetGlitches,
+    CmdIQLogReset,
+    CmdIQLogGet,
+#endif
     
     CmdCheckLast
 };
 
 static const char *cmds[] = {
 
-	// receiver
-    "CmdSetRXFreq",
-    "CmdSetRXNsamps",
-    "CmdSetGen",
-    "CmdSetGenAttn",
+    // general
     "CmdPing",
     "CmdLoad",
     "CmdPing2",
-    "CmdGetRX",
-    "CmdClrRXOvfl",
-    "CmdSetWFFreq",
-    "CmdSetWFDecim",
-    "CmdWFReset",
-    "CmdGetWFSamples",
-    "CmdGetWFContSamps",
     "CmdCPUCtrClr",
     "CmdGetCPUCtr",
     "CmdCtrlSet",
@@ -97,20 +97,42 @@ static const char *cmds[] = {
 	"CmdFlush",
     "CmdTestRead",
     "CmdUploadStackCheck",
+    "CmdGetSPRP",
+
+	// SDR
+#if RX_CHANS
+    "CmdSetRXFreq",
+    "CmdSetRXNsamps",
+    "CmdSetGen",
+    "CmdSetGenAttn",
+    "CmdGetRX",
+    "CmdClrRXOvfl",
+    "CmdSetWFFreq",
+    "CmdSetWFDecim",
+    "CmdWFReset",
+    "CmdGetWFSamples",
+    "CmdGetWFContSamps",
+#endif
 
 	// GPS
+#if GPS_CHANS
     "CmdSample",
     "CmdSetMask",
-    "CmdSetRateCA",
+    "CmdSetRateCG",
     "CmdSetRateLO",
-    "CmdSetGainCA",
+    "CmdSetGainCG",
     "CmdSetGainLO",
-    "CmdSetSV",
+    "CmdSetSat",
+    "CmdSetE1Bcode",
+    "CmdSetPolarity",
     "CmdPause",
     "CmdGetGPSSamples",
     "CmdGetChan",
     "CmdGetClocks",
     "CmdGetGlitches",
+    "CmdIQLogReset",
+    "CmdIQLogGet",
+#endif
 };
 
 #define DMA_ALIGNMENT __attribute__ ((aligned(256)))

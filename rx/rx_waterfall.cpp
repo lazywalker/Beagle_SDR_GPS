@@ -35,6 +35,8 @@ Boston, MA  02110-1301, USA.
 #include "cfg.h"
 #include "datatypes.h"
 #include "ext_int.h"
+#include "rx.h"
+#include "noiseproc.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -73,7 +75,8 @@ Boston, MA  02110-1301, USA.
 
 #define	MAX_START(z)	((WF_WIDTH << MAX_ZOOM) - (WF_WIDTH << (MAX_ZOOM - z)))
 
-static const int wf_fps[] = { WF_SPEED_SLOW, WF_SPEED_MED, WF_SPEED_FAST };
+#define WF_NSPEEDS 5
+static const int wf_fps[] = { WF_SPEED_OFF, WF_SPEED_1FPS, WF_SPEED_SLOW, WF_SPEED_MED, WF_SPEED_FAST };
 
 static float window_function_c[WF_C_NSAMPS];
 
@@ -89,9 +92,11 @@ static struct wf_t {
 	u2_t fft2wf_map[WF_C_NFFT / WF_USING_HALF_FFT];		// map is 1:1 with fft
 	u2_t wf2fft_map[WF_WIDTH];							// map is 1:1 with plot
 	int start, prev_start, zoom, prev_zoom;
-	int mark, slow, fft_used_limit;
+	int mark, speed, fft_used_limit;
 	bool new_map, new_map2, compression;
 	int flush_wf_pipe;
+	int noise_blanker, noise_threshold, nb_click;
+	u4_t last_noise_pulse;
 	SPI_MISO hw_miso;
 } wf_inst[WF_CHANS];
 
@@ -175,15 +180,15 @@ void c2s_waterfall_compression(int rx_chan, bool compression)
 #define	CMD_ZOOM	0x01
 #define	CMD_START	0x02
 #define	CMD_DB		0x04
-#define	CMD_SLOW	0x08
-#define	CMD_ALL		(CMD_ZOOM | CMD_START | CMD_DB | CMD_SLOW)
+#define	CMD_SPEED	0x08
+#define	CMD_ALL		(CMD_ZOOM | CMD_START | CMD_DB | CMD_SPEED)
 
 void c2s_waterfall_setup(void *param)
 {
 	conn_t *conn = (conn_t *) param;
 	int rx_chan = conn->rx_channel;
 
-	send_msg(conn, SM_WF_DEBUG, "MSG center_freq=%d bandwidth=%d", (int) ui_srate/2, (int) ui_srate);
+	send_msg(conn, SM_WF_DEBUG, "MSG center_freq=%d bandwidth=%d adc_clk_nom=%.0f", (int) ui_srate/2, (int) ui_srate, ADC_CLOCK_NOM);
 	send_msg(conn, SM_WF_DEBUG, "MSG kiwi_up=1");
 	extint_send_extlist(conn);
 
@@ -202,7 +207,7 @@ void c2s_waterfall(void *param)
 	//float adc_scale_samps = powf(2, -ADC_BITS);
 
 	bool new_map, overlapped_sampling = false;
-	int wband, _wband, zoom=-1, _zoom, scale=1, _scale, _slow, _dvar, _pipe;
+	int wband, _wband, zoom=-1, _zoom, scale=1, _scale, _speed, _dvar, _pipe;
 	float start=-1, _start;
 	bool do_send_msg = FALSE;
 	float samp_wait_us;
@@ -344,6 +349,13 @@ void c2s_waterfall(void *param)
 					do_send_msg = TRUE;
 					new_map = wf->new_map = wf->new_map2 = TRUE;
 					
+					if (wf->noise_blanker) {
+					    //u4_t srate = round(conn->adc_clock_corrected) / (1 << (zoom+1));
+					    u4_t srate = WF_C_NSAMPS * 2;   // FIXME: what's the correct value to use?
+					    printf("NB WF Z-change z%d sr=%d\n", zoom, srate);
+                        m_NoiseProc[rx_chan][NB_WF].SetupBlanker("WF", (float) wf->noise_threshold, (float) wf->noise_blanker, srate);
+                    }
+                    
 					// when zoom changes reevaluate if overlapped sampling might be needed
 					overlapped_sampling = false;
 					
@@ -442,22 +454,32 @@ void c2s_waterfall(void *param)
 				continue;
 			}
 
-			i = sscanf(cmd, "SET slow=%d", &_slow);
+			i = sscanf(cmd, "SET wf_speed=%d", &_speed);
 			if (i == 1) {
-				//printf("waterfall: slow=%d\n", _slow);
-				if (wf->slow != _slow) {
-					/*
-					if (!conn->first_slow && wf_max) {
-						wf->slow = 2;
-						conn->first_slow = TRUE;
-					} else {
-					*/
-						wf->slow = _slow;
-						//wf->slow = 0;
-					//}
-					//printf("waterfall: SLOW %d\n", wf->slow);
-				}
-				cmd_recv |= CMD_SLOW;
+				//printf("W/F wf_speed=%d\n", _speed);
+				if (_speed == -1) _speed = WF_NSPEEDS-1;
+				if (_speed >= 0 && _speed < WF_NSPEEDS)
+				    wf->speed = _speed;
+				cmd_recv |= CMD_SPEED;
+				continue;
+			}
+
+            int nb, th;
+			i = sscanf(cmd, "SET nb=%d th=%d", &nb, &th);
+			if (i == 2) {
+			    if (nb < 0) {
+			        wf->nb_click = (nb == -1)? 1:0;
+			        continue;
+			    }
+			    wf->noise_blanker = nb;
+			    wf->noise_threshold = th;
+
+                if (wf->noise_blanker) {
+                    //u4_t srate = round(conn->adc_clock_corrected) / (1 << (zoom+1));
+					u4_t srate = WF_C_NSAMPS * 2;   // FIXME: what's the correct value to use?
+                    printf("NB WF ON usec=%d th=%d z%d sr=%d\n", wf->noise_blanker, wf->noise_threshold, zoom, srate);
+                    m_NoiseProc[rx_chan][NB_WF].SetupBlanker("WF", (float) wf->noise_threshold, (float) wf->noise_blanker, srate);
+                }
 				continue;
 			}
 
@@ -526,9 +548,9 @@ void c2s_waterfall(void *param)
 			// Ask sound task to stop (must not do while, for example, holding a lock).
 			// We've seen cases where the sound connects, then times out. But the w/f has never connected.
 			// So have to check for conn->other being valid.
-			conn_t *cwf = conn->other;
-			if (cwf && cwf->type == STREAM_SOUND && cwf->rx_channel == conn->rx_channel) {
-				cwf->stop_data = TRUE;
+			conn_t *csnd = conn->other;
+			if (csnd && csnd->type == STREAM_SOUND && csnd->rx_channel == conn->rx_channel) {
+				csnd->stop_data = TRUE;
 			} else {
 				rx_enable(rx_chan, RX_CHAN_FREE);		// there is no SND, so free rx_chan[] now
 			}
@@ -543,11 +565,13 @@ void c2s_waterfall(void *param)
 			continue;
 		}
 		
-		// don't process any waterfall data until we've received all necessary commands
-		if (cmd_recv != CMD_ALL) {
+		// Don't process any waterfall data until we've received all necessary commands.
+		// Also, stop waterfall if speed is zero.
+		if (cmd_recv != CMD_ALL || wf->speed == WF_SPEED_OFF) {
 			TaskSleepMsec(100);
 			continue;
 		}
+		
 		if (!cmd_recv_ok) {
 			#ifdef TR_WF_CMDS
 				clprintf(conn, "W/F cmd_recv ALL 0x%x/0x%x\n", cmd_recv, CMD_ALL);
@@ -570,7 +594,7 @@ void c2s_waterfall(void *param)
 		// NB: plot_width can be greater than WF_WIDTH because it relative to the ratio of the
 		// (adc_clock_corrected/2) / ui_srate, which can be > 1 (hence plot_width_clamped).
 		// All this is necessary because we might be displaying less than what adc_clock_corrected/2 implies because
-		// of using third-party obtained frequency scale images in our UI.
+		// of using third-party obtained frequency scale images in our UI (this is not currently an issue).
 		wf->plot_width = WF_WIDTH * span / disp_fs;
 		wf->plot_width_clamped = (wf->plot_width > WF_WIDTH)? WF_WIDTH : wf->plot_width;
 		
@@ -651,10 +675,10 @@ void c2s_waterfall(void *param)
 
 		// create waterfall
 		
-		// desired frame rate greater than what full sampling can deliver, so start overlapped sampling
-		assert(wf_fps[wf->slow] != 0);
-		int desired = 1000 / wf_fps[wf->slow];
+		assert(wf_fps[wf->speed] != 0);
+		int desired = 1000 / wf_fps[wf->speed];
 
+		// desired frame rate greater than what full sampling can deliver, so start overlapped sampling
 		if (!overlapped_sampling && samp_wait_ms > desired) {
 			overlapped_sampling = true;
 			
@@ -742,7 +766,6 @@ void c2s_waterfall(void *param)
 				fft->hw_c_samps[sn][Q] = fq;
 				sn++;
 			}
-			
 		}
 
 		#ifndef EV_MEAS_WF
@@ -777,12 +800,25 @@ void c2s_waterfall(void *param)
 
 void compute_frame(wf_t *wf, fft_t *fft)
 {
+	int rx_chan = wf->conn->rx_channel;
 	int i;
 	wf_pkt_t out;
 	u1_t comp_in_buf[WF_WIDTH];
 	float pwr[MAX_FFT_USED];
 		
     TaskStatU(0, 0, NULL, TSTAT_INCR|TSTAT_ZERO, 0, "frm");
+
+    if (wf->nb_click) {
+        u4_t now = timer_sec();
+        if (now != wf->last_noise_pulse) {
+            wf->last_noise_pulse = now;
+            fft->hw_c_samps[255][I] = 0.49;
+        }
+    }
+
+    if (wf->noise_blanker) {
+        m_NoiseProc[rx_chan][NB_WF].ProcessBlankerOneShot(WF_C_NSAMPS, (TYPECPX*) fft->hw_c_samps, (TYPECPX*) fft->hw_c_samps);
+    }
 
 	//NextTask("FFT1");
 	evWF(EC_EVENT, EV_WF, -1, "WF", "compute_frame: FFT start");
@@ -1003,7 +1039,6 @@ if (i == 516) printf("\n");
 	}
 
 	// sync this waterfall line to audio packet currently going out
-	int rx_chan = wf->conn->rx_channel;
 	snd_t *snd = &snd_inst[rx_chan];
 	out.seq = snd->seq;
 

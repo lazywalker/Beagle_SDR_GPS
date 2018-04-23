@@ -26,7 +26,7 @@ module CPU (
     
     input  wire [15:0] par,
     input  wire [1:0]  ser,
-    input  wire        mem_rd,
+    input  wire        mem_rd,      // current insn is a mem read which should ++ the mem addr in TOS
     output wire [15:0] mem_dout,
     input  wire        boot_done,
     
@@ -52,7 +52,7 @@ module CPU (
 
     //	bbbb bbbb-------- op8 [7:0]
     //	100p ppppR....... alu insns, R = rtn
-    //	100p ppppRiiiiiii  addi, imm [6:0]
+    //	100p ppppRiiiiiii  addi, imm [6:0] 0-127
     //	100p ppppRCxxxxxx  add, C = carry-in
     //	100p ppppRSxxxxxx  rdBit, S selects 'ser' bit input
     //	100p ppppRxxxxxxx  others, EXCEPT illegal for: r, r_from, to_r
@@ -86,6 +86,7 @@ module CPU (
                op_or        =  8'h8C,
                op_xor       =  8'h8D,
                op_not       =  8'h8E,
+               op_mult18    =  8'h8F,
 
                op_shl64     =  8'h90,
                op_shl       =  8'h91,
@@ -152,6 +153,8 @@ module CPU (
         case (op8)
             op_swap, op_rot    : nos <= tos;
             op_shl64           : nos <= {nos[30:0], tos[31]};
+          //op_mult18          : nos <= {{28{nos_x_tos[35]}}, nos_x_tos[35:32]};    // 64-bit sign extend
+            op_mult18          : nos <= {{24{prod40[39]}}, prod40[39:32]};          // 64-bit sign extend
             default :
                 if      (inc_sp) nos <= tos;
                 else if (dec_sp) nos <= dstk_dout;
@@ -160,9 +163,10 @@ module CPU (
     //////////////////////////////////////////////////////////////////////////
     // ALU
 
-`ifdef USE_CPU_MULT
+    reg [17:0] xa, xb;
     wire [35:0] nos_x_tos;
-`endif
+    wire [19:0] xa20, xb20;
+    wire [39:0] prod40;
     wire [31:0] sum;
     wire co;
     wire ci = (op8==op_add && opt_cin && carry) || op8==op_sub;
@@ -185,27 +189,39 @@ module CPU (
         else				b =  tos;
 
     always @*
-        if     (op_push)	   alu = op;
-        else if (mem_rd)	   alu = sum;
+        if     (op_push)    alu = op;       // side-effect alu[31:16] <= 0
+        else if (mem_rd)    alu = sum;
         else case (op8)
             op_add, op_addi,
-            op_sub           : alu = sum;
-`ifdef USE_CPU_MULT
-            op_mult          : alu = nos_x_tos[31:0];
-`endif
-            op_and           : alu = nos & tos;
-            op_or            : alu = nos | tos;
-//			op_xor           : alu = nos ^ tos;
-			op_not           : alu =     ~ tos;
-            op_shl, op_shl64 : alu = {tos[30:0], 1'b0};
-            op_shr           : alu = {tos[31], tos[31:1]};
-            default          : alu = tos;
+            op_sub          : alu = sum;
+          //op_mult,
+          //op_mult18       : alu = nos_x_tos[31:0];
+            op_mult         : alu = nos_x_tos[31:0];
+            op_mult18       : alu = prod40[31:0];
+            op_and          : alu = nos & tos;
+            op_or           : alu = nos | tos;
+//			op_xor          : alu = nos ^ tos;
+			op_not          : alu =     ~ tos;
+            op_shl, op_shl64: alu = {tos[30:0], 1'b0};
+            op_shr          : alu = {tos[31], tos[31:1]};   // really an asr preserving the sign bit
+            default         : alu = tos;
         endcase
 
-`ifdef USE_CPU_MULT
-    MULT18X18 mult(.P(nos_x_tos), .A({{2{nos[15]}},nos[15:0]}),
-                                  .B({{2{tos[15]}},tos[15:0]}));
-`endif
+    always @*
+        if (op8==op_mult) begin
+            xa = {{2{nos[15]}}, nos[15:0]};
+            xb = {{2{tos[15]}}, tos[15:0]};
+        end
+        else begin
+            xa = nos[17:0];
+            xb = tos[17:0];
+        end
+
+    MULT18X18 mult(.P(nos_x_tos), .A(xa), .B(xb));
+
+    assign xa20 = nos[19:0];
+    assign xb20 = tos[19:0];
+    ipcore_mult_20b_20b_40b mult20(.P(prod40), .A(xa20), .B(xb20));
 
     //////////////////////////////////////////////////////////////////////////
     // Top of stack
@@ -215,8 +231,8 @@ module CPU (
 
     always @*
         case (op4)
-            op_branchZ[15:12], op_wrReg: next_tos = nos; // branchNZ also
-                               op_rdReg: next_tos = par;
+            op_branchZ[15:12], op_wrReg: next_tos = nos;    // branchNZ also
+                               op_rdReg: next_tos = par;    // NB {16'b0, par}
             default :
                 case (op8)
                     op_swap, op_to_r,
@@ -224,8 +240,8 @@ module CPU (
                     op_rot             : next_tos = dstk_dout;
                     op_r_from, op_r    : next_tos = rstk_dout;
                     op_swap16          : next_tos = {tos[15:0], tos[31:16]};
-                    op_rdBit           : next_tos = {tos[30:0], serial};
-                    op_fetch16         : next_tos = mem_dout;
+                    op_rdBit           : next_tos = {tos[30:0], serial};        // 32-bit left shift
+                    op_fetch16         : next_tos = mem_dout;                   // NB {16'b0, mem_dout}
                     
                     op_sp			   : next_tos = sp;		// STACK_CHECK
                     op_rp			   : next_tos = rp;
@@ -239,13 +255,13 @@ module CPU (
     //////////////////////////////////////////////////////////////////////////
     // I/O
 
-    assign rdBit = (op8==op_rdBit) && !ser_sel;
+    assign rdBit  = (op8==op_rdBit) && !ser_sel;
     assign rdBit2 = (op8==op_rdBit) && ser_sel;
-    assign rdReg =  (op4==op_rdReg) && !op[11];
+    assign rdReg  = (op4==op_rdReg) && !op[11];
     assign rdReg2 = (op4==op_rdReg) && op[11];
-    assign wrReg =  (op4==op_wrReg) && !op[11];
+    assign wrReg  = (op4==op_wrReg) && !op[11];
     assign wrReg2 = (op4==op_wrReg) && op[11];
-    assign wrEvt = (op4==op_wrEvt) && !op[11];
+    assign wrEvt  = (op4==op_wrEvt) && !op[11];
     assign wrEvt2 = (op4==op_wrEvt) && op[11];
 
     //////////////////////////////////////////////////////////////////////////

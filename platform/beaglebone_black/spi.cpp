@@ -26,7 +26,6 @@
 #include "peri.h"
 #include "coroutines.h"
 #include "debug.h"
-#include "data_pump.h"
 
 #include <stdio.h>
 #include <unistd.h>
@@ -185,9 +184,9 @@ u4_t after = prev->status & BUSY_MASK;
 		last_rdy_seq = rdy_seq;
 	}
 	#else
-	evSpiCmd(EC_EVENT, EV_SPILOOP, -1, "spi_scan", evprintf(">>> DONE %s(%d) %d retries, PREV %s(%d) T%02d %p: 0x%x 0x%x 0x%x",
+	evSpiCmd(EC_EVENT, EV_SPILOOP, -1, "spi_scan", evprintf(">>> DONE %s(%d) %d retries, PREV %s(%d) %s %p: 0x%x 0x%x 0x%x",
 		cmds[mosi->data.cmd], mosi->data.cmd, retries,
-		cmds[prev->cmd], prev->cmd, prev->tid,
+		cmds[prev->cmd], prev->cmd, Task_s(prev->tid),
 		prev, prev->word[0], prev->word[1], prev->word[2]));
 	#endif
     prev = miso; // next caller collects this for us
@@ -305,7 +304,6 @@ void spi_set_noduplex(SPI_CMD cmd, uint16_t wparam, uint32_t lparam) {
 		spi_scan(&tx2);
 		stack_check(&pingx);
 #else
-		spi_scan(&tx2);				// Send request
 		tx2.data = _CmdFlush;
 		evSpiCmd(EC_EVENT, EV_SPILOOP, -1, "spi_setND", evprintf("CmdNoDuplex self-response"));
 		spi_scan(&tx2);				// Collect response to our own request
@@ -328,17 +326,18 @@ void _spi_get(SPI_CMD cmd, SPI_MISO *rx, int bytes, uint16_t wparam, uint32_t lp
     
     // wait for future SPI to make our reply valid
 	int busy = 0;
+	int tid = TaskID();
     while ((rx->status & BUSY_MASK) == BUSY) {
     	busy++;
-		evSpiCmd(EC_EVENT, EV_SPILOOP, -1, "spi_get", evprintf(">>>> BUSY WAIT for DONE #%d %s(%d) T%02d miso %p",
-			busy, cmds[cmd], cmd, TaskID(), rx));
+		evSpiCmd(EC_EVENT, EV_SPILOOP, -1, "spi_get", evprintf(">>>> BUSY WAIT for DONE #%d %s(%d) %s miso %p",
+			busy, cmds[cmd], cmd, Task_s(tid), rx));
     	if (busy > 2) {
-			if (ev_dump) evSpi(EC_EVENT, EV_SPILOOP, ev_dump, "spi_get", evprintf("NT_BUSY_WAIT / BUSY_HELPER failed? %s(%d) T%02d miso %p ------------------------------------------------",
-				cmds[cmd], cmd, TaskID(), rx));
+			if (ev_dump) evSpi(EC_EVENT, EV_SPILOOP, ev_dump, "spi_get", evprintf("NT_BUSY_WAIT / BUSY_HELPER failed? %s(%d) %s miso %p ------------------------------------------------",
+				cmds[cmd], cmd, Task_s(tid), rx));
     	}
     	NextTaskP("spi_get busy wait", NT_BUSY_WAIT); // wait for response
     }
-	evSpiCmd(EC_EVENT, EV_SPILOOP, -1, "spi_get", evprintf("BUSY WAIT is DONE %s(%d) T%02d miso %p",  cmds[cmd], cmd, TaskID(), rx));
+	evSpiCmd(EC_EVENT, EV_SPILOOP, -1, "spi_get", evprintf("BUSY WAIT is DONE %s(%d) %s miso %p",  cmds[cmd], cmd, Task_s(tid), rx));
 	evSpiCmd(EC_EVENT, EV_SPILOOP, -1, "spi_get", "DONE");
 }
 
