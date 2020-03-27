@@ -1,5 +1,23 @@
-#ifndef _CONFIG_H_
-#define _CONFIG_H_
+/*
+--------------------------------------------------------------------------------
+This library is free software; you can redistribute it and/or
+modify it under the terms of the GNU Library General Public
+License as published by the Free Software Foundation; either
+version 2 of the License, or (at your option) any later version.
+This library is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+Library General Public License for more details.
+You should have received a copy of the GNU Library General Public
+License along with this library; if not, write to the
+Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
+Boston, MA  02110-1301, USA.
+--------------------------------------------------------------------------------
+*/
+
+// Copyright (c) 2016 John Seamons, ZL/KF6VO
+
+#pragma once
 
 // these defines are set by the makefile:
 // DEBUG
@@ -8,12 +26,20 @@
 // LOGGING_HOST, KIWI_UI_LIST, REPO
 // {EDATA_DEVEL, EDATA_EMBED}
 
-// unfortunately, valgrind doesn't work on Debian 8 with our private thread scheme
-//#define USE_VALGRIND
+#define FW_SEL_SDR_RX4_WF4  0
+#define FW_SEL_SDR_RX8_WF2  1
+#define FW_SEL_SDR_RX3_WF3  2
+#define FW_SEL_SDR_RX14_WF0 3
 
-// backup values only if dig lookup fails
-#define KIWISDR_COM_PUBLIC_IP   "50.116.2.70"
-#define SDR_HU_PUBLIC_IP        "174.138.38.40"
+#define MAX_RX_CHANS    16
+#define MAX_WF_CHANS    4
+#define MAX_NRX_BUFS    16      // for RXBUF_SIZE_14CH
+#define MAX_NRX_SAMPS   226     // for nch = 3
+#define NRX_SAMPS_CHANS(nch)    ((NRX_SPI - NRX_OVHD) / NRX_IQW / nch);
+//                              (((2048-1) - (3+1+1)) / 3 / nch) = 680 / nch
+
+extern int fw_sel, fpga_id, rx_chans, wf_chans, nrx_bufs, nrx_samps, nrx_samps_loop, nrx_samps_rem,
+    snd_rate, rx_decim;
 
 // INET6_ADDRSTRLEN (46) plus some extra in case ipv6 scope/zone is an issue
 // can't be in net.h due to #include recursion problems
@@ -38,5 +64,3 @@ typedef struct {
 } user_iface_t;
 
 extern user_iface_t user_iface[];
-
-#endif

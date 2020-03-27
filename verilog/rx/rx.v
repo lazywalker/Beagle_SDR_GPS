@@ -35,22 +35,27 @@ module RX (
 	input  wire		   cpu_clk,
     input  wire [31:0] freeze_tos,
     
-    input  wire        set_rx_freq_C
+    input  wire        set_rx_freqH_C,
+    input  wire        set_rx_freqL_C
 	);
 	
 	parameter IN_WIDTH  = "required";
 
-	reg signed [31:0] rx_phase_inc;
-	wire set_phase;
+	reg signed [47:0] rx_phase_inc;
+	wire set_phaseH, set_phaseL;
 
-	SYNC_PULSE set_phase_inst (.in_clk(cpu_clk), .in(rx_sel_C && set_rx_freq_C), .out_clk(adc_clk), .out(set_phase));
+	SYNC_PULSE set_phaseH_inst (.in_clk(cpu_clk), .in(rx_sel_C && set_rx_freqH_C), .out_clk(adc_clk), .out(set_phaseH));
+	SYNC_PULSE set_phaseL_inst (.in_clk(cpu_clk), .in(rx_sel_C && set_rx_freqL_C), .out_clk(adc_clk), .out(set_phaseL));
 
     always @ (posedge adc_clk)
-        if (set_phase) rx_phase_inc <= freeze_tos;
+    begin
+        if (set_phaseH) rx_phase_inc[16 +:32] <= freeze_tos;
+        if (set_phaseL) rx_phase_inc[ 0 +:16] <= freeze_tos;
+    end
 
 	wire signed [RX1_BITS-1:0] rx_mix_i, rx_mix_q;
 
-	IQ_MIXER #(.IN_WIDTH(IN_WIDTH), .OUT_WIDTH(RX1_BITS))
+	IQ_MIXER #(.PHASE_WIDTH(48), .IN_WIDTH(IN_WIDTH), .OUT_WIDTH(RX1_BITS))
 		rx_mixer (
 			.clk		(adc_clk),
 			.phase_inc	(rx_phase_inc),
@@ -64,22 +69,22 @@ module RX (
 
 	localparam RX1_GROWTH = RX1_STAGES * clog2(RX1_DECIM);
 
-cic_prune_var #(.INCLUDE("cic_rx1.vh"), .STAGES(RX1_STAGES), .DECIMATION(RX1_DECIM), .GROWTH(RX1_GROWTH), .IN_WIDTH(RX1_BITS), .OUT_WIDTH(RX2_BITS))
+cic_prune_var #(.INCLUDE("rx1"), .STAGES(RX1_STAGES), .DECIMATION(RX1_DECIM), .GROWTH(RX1_GROWTH), .IN_WIDTH(RX1_BITS), .OUT_WIDTH(RX2_BITS))
 	rx_cic1_i(
 		.clock			(adc_clk),
 		.reset			(1'b0),
-		.decimation		(13'b0),
+		.decimation		(18'b0),
 		.in_strobe		(1'b1),
 		.out_strobe		(rx_cic1_avail),
 		.in_data		(rx_mix_i),
 		.out_data		(rx_cic1_out_i)
     );
 
-cic_prune_var #(.INCLUDE("cic_rx1.vh"), .STAGES(RX1_STAGES), .DECIMATION(RX1_DECIM), .GROWTH(RX1_GROWTH), .IN_WIDTH(RX1_BITS), .OUT_WIDTH(RX2_BITS))
+cic_prune_var #(.INCLUDE("rx1"), .STAGES(RX1_STAGES), .DECIMATION(RX1_DECIM), .GROWTH(RX1_GROWTH), .IN_WIDTH(RX1_BITS), .OUT_WIDTH(RX2_BITS))
 	rx_cic1_q(
 		.clock			(adc_clk),
 		.reset			(1'b0),
-		.decimation		(13'b0),
+		.decimation		(18'b0),
 		.in_strobe		(1'b1),
 		.out_strobe		(),
 		.in_data		(rx_mix_q),
@@ -91,11 +96,27 @@ cic_prune_var #(.INCLUDE("cic_rx1.vh"), .STAGES(RX1_STAGES), .DECIMATION(RX1_DEC
 
 	localparam RX2_GROWTH = RX2_STAGES * clog2(RX2_DECIM);
 
-cic_prune_var #(.INCLUDE("cic_rx2.vh"), .STAGES(RX2_STAGES), .DECIMATION(RX2_DECIM), .GROWTH(RX2_GROWTH), .IN_WIDTH(RX2_BITS), .OUT_WIDTH(RXO_BITS))
+`ifdef USE_RX_SEQ
+
+cic_prune_seq #(.INCLUDE("rx3"), .STAGES(RX2_STAGES), .DECIMATION(RX2_DECIM), .GROWTH(RX2_GROWTH), .IN_WIDTH(RX2_BITS), .OUT_WIDTH(RXO_BITS))
+	rx_cic2 (
+		.clock			(adc_clk),
+		.reset			(1'b0),
+		.in_strobe		(rx_cic1_avail),
+		.out_strobe_i	(rx_cic2_strobe_i),
+		.out_strobe_q	(),
+		.in_data_i		(rx_cic1_out_i),
+		.in_data_q		(rx_cic1_out_q),
+		.out_data		(rx_cic2_out)
+    );
+
+`else
+
+cic_prune_var #(.INCLUDE("rx2"), .STAGES(RX2_STAGES), .DECIMATION(RX2_DECIM), .GROWTH(RX2_GROWTH), .IN_WIDTH(RX2_BITS), .OUT_WIDTH(RXO_BITS))
 	rx_cic2_i(
 		.clock			(adc_clk),
 		.reset			(1'b0),
-		.decimation		(13'b0),
+		.decimation		(18'b0),
 		.in_strobe		(rx_cic1_avail),
 		.out_strobe		(rx_cic2_strobe_i),
 		.in_data		(rx_cic1_out_i),
@@ -103,11 +124,11 @@ cic_prune_var #(.INCLUDE("cic_rx2.vh"), .STAGES(RX2_STAGES), .DECIMATION(RX2_DEC
 		//.out_data		()
     );
 
-cic_prune_var #(.INCLUDE("cic_rx2.vh"), .STAGES(RX2_STAGES), .DECIMATION(RX2_DECIM), .GROWTH(RX2_GROWTH), .IN_WIDTH(RX2_BITS), .OUT_WIDTH(RXO_BITS))
+cic_prune_var #(.INCLUDE("rx2"), .STAGES(RX2_STAGES), .DECIMATION(RX2_DECIM), .GROWTH(RX2_GROWTH), .IN_WIDTH(RX2_BITS), .OUT_WIDTH(RXO_BITS))
 	rx_cic2_q(
 		.clock			(adc_clk),
 		.reset			(1'b0),
-		.decimation		(13'b0),
+		.decimation		(18'b0),
 		.in_strobe		(rx_cic1_avail),
 		.out_strobe		(),
 		.in_data		(rx_cic1_out_q),
@@ -121,5 +142,7 @@ cic_prune_var #(.INCLUDE("cic_rx2.vh"), .STAGES(RX2_STAGES), .DECIMATION(RX2_DEC
 		rx_dout = rd_i? rx_cic2_out_i[15:0] : ( rd_q? rx_cic2_out_q[15:0] : {rx_cic2_out_i[RXO_BITS-1 -:8], rx_cic2_out_q[RXO_BITS-1 -:8]} );
 
 	assign rx_dout_A = rx_dout;
+
+`endif
 
 endmodule

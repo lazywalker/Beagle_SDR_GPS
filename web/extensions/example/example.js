@@ -1,18 +1,18 @@
 // Copyright (c) 2017 John Seamons, ZL/KF6VO
 
-var example_ext_name = 'example';		// NB: must match example.c:example_ext.name
-
-var example_first_time = true;
+var example = {
+   ext_name: 'example',    // NB: must match example.cpp:example_ext.name
+   first_time: true,
+   CMD1: 0
+};
 
 function example_main()
 {
-	ext_switch_to_client(example_ext_name, example_first_time, example_recv);		// tell server to use us (again)
-	if (!example_first_time)
+	ext_switch_to_client(example.ext_name, example.first_time, example_recv);		// tell server to use us (again)
+	if (!example.first_time)
 		example_controls_setup();
-	example_first_time = false;
+	example.first_time = false;
 }
-
-var example_cmd_e = { CMD1:0 };
 
 function example_recv(data)
 {
@@ -23,7 +23,7 @@ function example_recv(data)
 		var ba = new Uint8Array(data, 4);
 		var cmd = ba[0];
 
-		if (cmd == example_cmd_e.CMD1) {
+		if (cmd == example.CMD1) {
 			// do something ...
 		} else {
 			console.log('example_recv: DATA UNKNOWN cmd='+ cmd +' len='+ (ba.length-1));
@@ -39,7 +39,7 @@ function example_recv(data)
 		var param = params[i].split("=");
 
 		if (1 && param[0] != "keepalive") {
-			if (typeof param[1] != "undefined")
+			if (isDefined(param[1]))
 				console.log('example_recv: '+ param[0] +'='+ param[1]);
 			else
 				console.log('example_recv: '+ param[0]);
@@ -80,12 +80,13 @@ function example_controls_setup()
 
 	ext_panel_show(controls_html, data_html, null);
 	time_display_setup('example');
-	example_resize();
+	example_environment_changed( {resize:1} );
 }
 
-// automatically called on window resize
-function example_resize()
+// automatically called on changes in the environment
+function example_environment_changed(changed)
 {
+   if (!changed.resize) return;
 	var el = w3_el('id-example-data');
 	var left = (window.innerWidth - 1024 - time_display_width()) / 2;
 	el.style.left = px(left);
@@ -99,16 +100,13 @@ function example_blur()
 // called to display HTML for configuration parameters in admin interface
 function example_config_html()
 {
-	ext_admin_config(example_ext_name, 'Example',
-		w3_divs('id-example w3-text-teal w3-hide', '',
-			'<b>Example configuration</b>' +
-			'<hr>' +
-			w3_third('', 'w3-container',
-				w3_divs('', 'w3-margin-bottom',
-					w3_input_get_param('int1', 'example.int1', 'w3_num_cb'),
-					w3_input_get_param('int2', 'example.int2', 'w3_num_cb')
-				), '', ''
-			)
-		)
-	);
+   var s =
+      w3_third('', 'w3-container',
+         w3_divs('w3-margin-bottom',
+            w3_input_get('', 'int1', 'example.int1', 'w3_num_cb'),
+            w3_input_get('', 'int2', 'example.int2', 'w3_num_cb')
+         ), '', ''
+      );
+
+   ext_config_html(example, 'example', 'Example', 'Example configuration');
 }

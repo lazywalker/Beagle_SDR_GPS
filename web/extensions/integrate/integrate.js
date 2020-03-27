@@ -1,15 +1,22 @@
 // Copyright (c) 2016 John Seamons, ZL/KF6VO
 
-var integrate_ext_name = 'integrate';		// NB: must match integrate.c:integrate_ext.name
+var integrate_itime_init = 10.0;
+var integrate_maxdb_init = -10;
+var integrate_mindb_init = -134;
 
-var integrate_first_time = true;
+var integrate = {
+   ext_name: 'integrate',     // NB: must match integrate.c:integrate_ext.name
+   first_time: true,
+
+	'itime':integrate_itime_init, 'pre':0, 'maxdb':integrate_maxdb_init, 'mindb':integrate_mindb_init
+};
 
 function integrate_main()
 {
-	ext_switch_to_client(integrate_ext_name, integrate_first_time, integrate_recv);		// tell server to use us (again)
-	if (!integrate_first_time)
+	ext_switch_to_client(integrate.ext_name, integrate.first_time, integrate_recv);		// tell server to use us (again)
+	if (!integrate.first_time)
 		integrate_controls_setup();
-	integrate_first_time = false;
+	integrate.first_time = false;
 }
 
 var integ_w = 1024;
@@ -38,14 +45,14 @@ function integrate_clear()
 	switch (integrate_preset) {
 	
 	case 0:		// Alpha has sub-display on left
-		ext_set_controls_width_height();		// default width
+		ext_set_controls_width_height(undefined, 290);		// default width
 		left.style.width = '49.9%';
 		right.style.width = '49.9%';
 		integrate_alpha();
 		break;
 	
 	default:
-		ext_set_controls_width_height(300);
+		ext_set_controls_width_height(275, 290);
 		left.style.width = '0%';
 		right.style.width = '100%';
 		var f = ext_get_freq();
@@ -76,7 +83,7 @@ function integrate_marker(txt, left, f)
 {
 	// draw frequency markers on FFT canvas
 	var c = integrate_data_canvas.ctx;
-	var pxphz = integ_w / integrate_sample_rate;
+	var pxphz = integ_w / ext_sample_rate();
 	
 	txt = left? (txt + '\u25BC') : ('\u25BC'+ txt);
 	c.font = '12px Verdana';
@@ -90,7 +97,6 @@ function integrate_marker(txt, left, f)
 	//console.log('MKR='+ txt +' car='+ carrier +' f='+ f +' pxphz='+ pxphz +' coff='+ car_off +' dpx='+ dpx +' tx='+ tx);
 }
 
-var integrate_sample_rate;
 var integrate_cmd_e = { FFT:0, CLEAR:1 };
 var integ_dbl;    // vertical line doubling (or more)
 var integ_maxdb, integ_mindb;
@@ -113,8 +119,7 @@ function integrate_recv(data)
 	// process data sent from server/C by ext_send_msg_data()
 	if (firstChars == "DAT") {
 		var ba = new Uint8Array(data, 4);
-		var cmd = ba[0] >> 1;
-		var ch = ba[0] & 1;
+		var cmd = ba[0];
 		var o = 1;
 		var len = ba.length-1;
 
@@ -160,7 +165,7 @@ function integrate_recv(data)
 		var param = params[i].split("=");
 
 		if (0 && param[0] != "keepalive") {
-			if (typeof param[1] != "undefined")
+			if (isDefined(param[1]))
 				console.log('integrate_recv: '+ param[0] +'='+ param[1]);
 			else
 				console.log('integrate_recv: '+ param[0]);
@@ -172,10 +177,6 @@ function integrate_recv(data)
 				integrate_controls_setup();
 				break;
 
-			case "srate":
-				integrate_sample_rate = parseFloat(param[1]);
-				break;
-
 			case "bins":
 				integ_bins = parseInt(param[1]);
 				integ_bino = 0;
@@ -183,7 +184,7 @@ function integrate_recv(data)
 				if (integ_dbl < 1) integ_dbl = 1;
 				integ_yo = (integ_h - integ_dbl * integ_bins) / 2;
 				if (integ_yo < 0) integ_yo = 0;
-				console.log('integrate_recv bins='+ integ_bins +' dbl='+ integ_dbl +' yo='+ integ_yo);
+				//console.log('integrate_recv bins='+ integ_bins +' dbl='+ integ_dbl +' yo='+ integ_yo);
 				integ_yo += integ_hdr;
 				integ_draw = true;
 				
@@ -195,14 +196,6 @@ function integrate_recv(data)
 		}
 	}
 }
-
-var integrate_itime_init = 10.0;
-var integrate_maxdb_init = -10;
-var integrate_mindb_init = -134;
-
-var integrate = {
-	'itime':integrate_itime_init, 'pre':0, 'maxdb':integrate_maxdb_init, 'mindb':integrate_mindb_init
-};
 
 var integrate_data_canvas, integrate_info_canvas;
 
@@ -235,15 +228,15 @@ function integrate_controls_setup()
 	};
 
 	var controls_html =
-		w3_divs('id-integrate-controls w3-text-white', '',
+		w3_div('id-integrate-controls w3-text-white',
 			w3_half('', '',
 				info_html,
-				w3_divs('w3-container', 'w3-tspace-8',
+				w3_divs('w3-container/w3-tspace-8',
 					w3_div('w3-medium w3-text-aqua', '<b>Audio integration</b>'),
-					w3_input('Integrate time (secs)', 'integrate.itime', integrate.itime, 'integrate_itime_cb', '', 'w3-width-64'),
+					w3_input('w3-width-64 w3-padding-smaller', 'Integrate time (secs)', 'integrate.itime', integrate.itime, 'integrate_itime_cb'),
 					w3_select('', 'Presets', 'select', 'integrate.pre', -1, pre_s, 'integrate_pre_select_cb'),
-					w3_slider('WF max', 'integrate.maxdb', integrate.maxdb, -100, 20, 1, 'integrate_maxdb_cb'),
-					w3_slider('WF min', 'integrate.mindb', integrate.mindb, -190, -30, 1, 'integrate_mindb_cb'),
+					w3_slider('', 'WF max', 'integrate.maxdb', integrate.maxdb, -100, 20, 1, 'integrate_maxdb_cb'),
+					w3_slider('', 'WF min', 'integrate.mindb', integrate.mindb, -190, -30, 1, 'integrate_mindb_cb'),
 					w3_button('', 'Clear', 'integrate_clear_cb')
 				), 'id-integrate-controls-left', 'id-integrate-controls-right'
 			)
@@ -260,7 +253,7 @@ function integrate_controls_setup()
 	integrate_info_canvas = w3_el('id-integrate-info-canvas');
 	integrate_info_canvas.ctx = integrate_info_canvas.getContext("2d");
 
-	integrate_resize();
+	integrate_environment_changed( {resize:1} );
 
 	integrate_itime_cb('integrate.itime', integrate.itime);
 	
@@ -270,8 +263,9 @@ function integrate_controls_setup()
 	integrate_update_interval = setInterval(integrate_update, 1000);
 }
 
-function integrate_resize()
+function integrate_environment_changed(changed)
 {
+   if (!changed.resize) return;
 	var el = w3_el('id-integrate-data');
 	var left = (window.innerWidth - integ_w - time_display_width()) / 2;
 	el.style.left = px(left);
@@ -347,7 +341,7 @@ function integrate_alpha()
 
 	// draw frequency markers on FFT canvas
 	var c = integrate_data_canvas.ctx;
-	var pxphz = integ_w / integrate_sample_rate;
+	var pxphz = integ_w / ext_sample_rate();
 	
 	c.font = '12px Verdana';
 	c.fillStyle = 'white';
@@ -452,19 +446,5 @@ function integrate_blur()
 // called to display HTML for configuration parameters in admin interface
 function integrate_config_html()
 {
-	ext_admin_config(integrate_ext_name, 'Integrate',
-		w3_divs('id-integrate w3-text-teal w3-hide', '',
-			'<b>Audio integration configuration</b>' +
-			'<hr>' +
-			''
-			/*
-			w3_third('', 'w3-container',
-				w3_divs('', 'w3-margin-bottom',
-					w3_input_get_param('int1', 'integrate.int1', 'w3_num_cb'),
-					w3_input_get_param('int2', 'integrate.int2', 'w3_num_cb')
-				), '', ''
-			)
-			*/
-		)
-	);
+   ext_config_html(integrate, 'integrate', 'Integrate', 'Integrate configuration');
 }

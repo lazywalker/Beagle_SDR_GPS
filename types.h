@@ -14,6 +14,7 @@ typedef signed short        s2_t;
 typedef signed char         s1_t;
 
 typedef void (*func_t)();
+typedef void (*funcPI_t)(int);
 typedef void (*funcP_t)(void *);
 typedef int (*funcPR_t)(void *);
 
@@ -47,6 +48,8 @@ typedef int (*funcPR_t)(void *);
 #define	B1(i)				(((i) >>  8) & 0xff)
 #define	B0(i)				(((i) >>  0) & 0xff)
 
+#define SET_LE_U32(a, u32)  a[0] = B0(u32); a[1] = B1(u32); a[2] = B2(u32); a[3] = B3(u32); 
+
 #define	FLIP32(i)			((B0(i) << 24) | (B1(i) << 16) | (B2(i) << 8) | (B3(i) << 0))
 #define	FLIP16(i)			((B0(i) << 8) | (B1(i) << 0))
 
@@ -58,13 +61,22 @@ typedef int (*funcPR_t)(void *);
  #define TRUE 1
 #endif
 
+#ifndef true
+ #define true 1
+#endif
+
 #ifndef FALSE
  #define FALSE 0
+#endif
+
+#ifndef false
+ #define false 0
 #endif
 
 #define	NOT_FOUND	-1
 
 #define	ARRAY_LEN(x)	((int) (sizeof (x) / sizeof ((x) [0])))
+#define ARRAY_END(x)    (&(x)[ARRAY_LEN(x)])
 
 #define	K		1024
 #define	M		(K*K)
@@ -74,9 +86,11 @@ typedef int (*funcPR_t)(void *);
 #define	kHz		1000
 
 #define MAX(a,b) ((a)>(b)?(a):(b))
-#define max(a,b) MAX(a,b)
 #define MIN(a,b) ((a)<(b)?(a):(b))
-#define min(a,b) MIN(a,b)
+
+static __inline__ u4_t round_up(u4_t val, u4_t size) { 
+	return (val + size - 1) / size * size;
+}
 
 #define I_DIV_CEIL(v,n) (((v)+(n))/(n))
 
@@ -86,6 +100,7 @@ typedef int (*funcPR_t)(void *);
 #define DEG_2_RAD(deg) ((deg) * K_PI / 180.0)
 #define RAD_2_DEG(rad) ((rad) * 180.0 / K_PI)
 
+#define CLAMP(a,min,max) ( ((a) < (min))? (min) : ( ((a) > (max))? (max) : (a) ) )
 #define SI_CLAMP(a,n) ( ((a) > ((n)-1))? ((n)-1) : ( ((a) < -(n))? -(n) : (a) ) )
 
 #define	STRINGIFY(x) #x

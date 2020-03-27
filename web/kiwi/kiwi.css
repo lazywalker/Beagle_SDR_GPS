@@ -1,6 +1,6 @@
 /* Copyright (c) 2016 John Seamons, ZL/KF6VO */
 
-.id-gps-gmap {
+.id-gps-map {
     border: 1px solid #ffffff;
     box-sizing: border-box;
 }
@@ -66,7 +66,7 @@ hr
 }
 
 
-#id-time-display-logo-inner
+.id-time-display-logo-inner
 {
 	opacity: 0;
 	transition: opacity 1s linear;
@@ -79,7 +79,7 @@ hr
 	right: 15px;
 }
 
-#id-time-display-logo-text
+.id-time-display-logo-text
 {
 	position: absolute;
 	top: 2pt;
@@ -90,12 +90,12 @@ hr
 	text-align: center;
 }
 
-#id-time-display-inner
+.id-time-display-inner
 {
 	transition: opacity 1s linear;
 }
 
-#id-time-display-text-inner
+.id-time-display-text-inner
 {
 	position: absolute;
 	top: 1pt;
@@ -176,18 +176,18 @@ hr
 	So can't use w3_col_percent for side-by-side placement. Do this width / margin-left hack instead.
 */
 
-.id-admin-ext
+.id-extensions
 {
 }
 
-.id-admin-ext-nav
+.id-extensions-nav
 {
-	width: 8%;
+	width: 10%;
 }
 
-.id-admin-ext-config
+.id-extensions-config
 {
-	margin-left: 10%;
+	margin-left: 12%;
 }
 
 .cl-optbar a
@@ -201,7 +201,8 @@ hr
 }
 
 /* override the w3-sidenav select/hover styles */
-.id-admin-nav-dom > .w3-current, .id-admin-nav-dom > .w3-current:hover
+.id-admin-nav-dom > .w3int-cur-sel, .id-admin-nav-dom > .w3int-cur-sel:hover,
+.id-fw-nav > .w3int-cur-sel, .id-fw-nav > .w3int-cur-sel:hover
 {
     color: white;
     background-color: #4CAF50;  /* select green */
@@ -212,6 +213,21 @@ hr
 {
 	color: yellow;
 	overflow: hidden;
+}
+
+.cl-dx-filtered
+{
+	color: black;
+	background-color: pink !important;
+}
+
+.cl-ext-help
+{
+	position: absolute;
+	top: 10px;
+	right: 40px;
+	cursor: pointer;
+	z-index:9999;
 }
 
 .class-mfg-panel
@@ -241,6 +257,11 @@ hr
 	margin: 5px;
 }
 
+.class-mfg-status pre
+{
+    margin: 0;
+}
+
 .class-mfg-button
 {
 	display: inline-block;
@@ -258,6 +279,7 @@ hr
 	font-weight: bold;
 	padding-left: 16px;
 }
+
 
 /* Tooltip container, from: www.w3schools.com/howto/howto_css_tooltip.asp */
 .class-tooltip {
@@ -345,4 +367,84 @@ hr
 {
 	left: 12%;
 	right: auto;
+}
+
+.fa-stack > .fa-nudge-down
+{
+	top: 5%;
+	bottom: auto;
+}
+
+
+/* text-security */
+
+input.kiwi-pw
+{
+    font-family: text-security-disc;
+}
+
+
+/* leaflet marker pin */
+.cl-leaflet-marker
+{
+    /* small icons since satellite map resolution is currently limited */
+    width: 14px;
+    height: 14px;
+    left: -7px;
+    top: -7px;
+    background-color: red;
+    display: block;
+    position: relative;
+    border-radius: 3rem 3rem 0;
+    transform: rotate(45deg);
+    border: 1px solid white;
+}
+
+.cl-legend-marker
+{
+    left: 0px;
+    top: 0px;
+    border: 1px solid black;
+    margin: 0 6px 0 16px;
+}
+
+
+/* map marker cluster icons */
+
+.cl-tdoa-cluster-base
+{
+    height: 25px;
+    line-height: 1;
+    width: 25px;
+    padding: 6px 2px;
+    margin: 10px;
+    text-align: center;
+    cursor: pointer;
+    position: absolute;
+    border-radius: 50%;
+    font-size: 1em;
+    font-weight: bold;
+}
+
+.cl-tdoa-cluster-kiwi
+{
+    color: white;
+    background: blue;
+    border: 2px solid red;
+}
+
+.cl-tdoa-cluster-refs
+{
+    color: black;
+    background: white;
+    border: 2px solid lime;
+}
+
+
+.id-wf-sp-button
+{
+    color: orange;
+    /* font-weight: normal; */
+    /* padding: 1px 3px 1px 3px; */
+    /* border: 2px solid orange; */
 }

@@ -19,8 +19,19 @@ This file is part of OpenWebRX.
 
 */
 
-// Copyright (c) 2015 - 2017 John Seamons, ZL/KF6VO
+// Copyright (c) 2015 - 2018 John Seamons, ZL/KF6VO
 
+var owrx = {
+   last_freq: -1,
+   last_mode: '',
+   last_locut: -1,
+   last_hicut: -1,
+   
+   last_mode_el: null,
+   dseq: 0,
+   
+   touch_hold_pressed: false,
+};
 
 // key freq concepts:
 //		all freqs in Hz
@@ -38,16 +49,15 @@ var height_top_bar_parts = 67;
 var height_spectrum_canvas = 200;
 
 var cur_mode;
-var wf_fps;
+var wf_fps, wf_fps_max;
 
 var ws_snd, ws_wf;
 
-var inactivity_timeout_override = -1;
-
-var spectrum_show = 0;
+var spectrum_show = 0, spectrum_param = -1;
 var gen_freq = 0, gen_attn = 0;
 var squelch_threshold = 0;
 var wf_rate = '';
+var wf_mm = '';
 var wf_compression = 1;
 var debug_v = 0;		// a general value settable from the URI to be used during debugging
 var sb_trace = 0;
@@ -56,15 +66,19 @@ var kiwi_gc_snd = 0;
 var kiwi_gc_wf = -1;
 var kiwi_gc_recv = -1;
 var kiwi_gc_wspr = -1;
-var override_ext = null, extint_param = null;
-var muted_initially = false;
+var override_ext = null;
+var muted_initially = 0;
+var peak_initially = null;
 var param_nocache = false;
 var nocache = false;
 var param_ctrace = false;
 var ctrace = false;
 var no_clk_corr = false;
-var override_pbw = 0;
+var override_pbw = '';
+var override_pbc = '';
 var nb_click = false;
+var no_geoloc = false;
+var mobile_laptop_test = false;
 
 var freq_memory = [];
 var freq_memory_pointer = -1;
@@ -92,7 +106,7 @@ function kiwi_main()
 		+' 9_10='+ override_9_10 +' min='+ override_min_dB +' max='+ override_max_dB);
 
 	// process URL query string parameters
-	var num_win = 4;
+	var num_win = 16;     // FIXME: should really be rx_chans, but that's not available yet 
 	console.log('URL: '+ window.location.href);
 	
 	var qs_parse = function(s) {
@@ -133,8 +147,10 @@ function kiwi_main()
 	}
 	
 	// reminder about how advanced features of RegExp work:
+	// x*			matches x 0 or more times
+	// x+			matches x 1 or more times
 	// x?			matches x 0 or 1 time
-	// (x)		capturing parens, stores in array
+	// (x)		capturing parens, stores in array beginning at [1]
 	// (?:x)y	non-capturing parens, allows y to apply to multi-char x
 	//	x|y		alternative (or)
 	// x? x* x+	0/1, >=0, >=1 occurrences of x
@@ -144,69 +160,93 @@ function kiwi_main()
 	//console.log(q);
 	
 	s = 'f'; if (q[s]) {
-		var p = new RegExp('([0-9.,]*)([^&#z]*)?z?([0-9]*)').exec(q[s]);
-		if (p[1]) override_freq = parseFloat(p[1].replace(',', '.'));
-		if (p[2]) override_mode = p[2].toLowerCase();
-		if (p[3]) override_zoom = p[3];
+		var p = new RegExp('([0-9.,kM]*)([\/:][-0-9.,k]*)?([^z]*)?z?([0-9]*)').exec(q[s]);
+      // 'k' suffix is simply ignored since default frequencies are in kHz
+      if (p[1]) override_freq = p[1].replace(',', '.').parseFloatWithUnits('M', 1e-3);
+      if (p[1]) console.log('p='+ p[1] +' override_freq='+ override_freq);
+      if (p[2]) console.log('override_pbw/pbc='+ p[2]);
+		if (p[2] && p[2].charAt(0) == '/') override_pbw = p[2].substr(1);     // remove leading '/'
+		if (p[2] && p[2].charAt(0) == ':') override_pbc = p[2].substr(1);     // remove leading ':'
+		if (p[3]) override_mode = p[3].toLowerCase();
+		if (p[4]) override_zoom = p[4];
+		//console.log('### f=['+ q[s] +'] len='+ p.length +' f=['+ p[1] +'] p=['+ p[2] +'] m=['+ p[3] +'] z=['+ p[4] +']');
 	}
 
 	s = 'ext'; if (q[s]) {
 	   var ext = q[s].split(',');
 		override_ext = ext[0];
-		extint_param = ext.slice(1).join(',');
-		console.log('URL: ext='+ override_ext +' ext_p='+ extint_param);
+		extint.param = ext.slice(1).join(',');
+		console.log('URL: ext='+ override_ext +' ext_p='+ extint.param);
 	}
 
-	s = 'pbw'; if (q[s]) override_pbw = parseInt(q[s]);
-	s = 'sp'; if (q[s]) spectrum_show = parseInt(q[s]);
-	s = 'sq'; if (q[s]) squelch_threshold = parseFloat(q[s]);
-	s = 'blen'; if (q[s]) audio_buffer_min_length_sec = parseFloat(q[s])/1000;
-	s = 'audio'; if (q[s]) audio_meas_dly_ena = parseFloat(q[s]);
-	s = 'vol'; if (q[s]) { volume = parseInt(q[s]); volume = Math.max(0, volume); volume = Math.min(400, volume); f_volume = volume/100; }
+	s = 'pbw'; if (q[s]) override_pbw = q[s];
+	s = 'pb'; if (q[s]) override_pbw = q[s];
+	s = 'pbc'; if (q[s]) override_pbc = q[s];
+	s = 'sp'; if (q[s]) spectrum_show = q[s];
+	s = 'spp'; if (q[s]) spectrum_param = parseFloat(q[s]);
+	s = 'vol'; if (q[s]) { volume = parseInt(q[s]); volume = Math.max(0, volume); volume = Math.min(400, volume); }
 	s = 'mute'; if (q[s]) muted_initially = parseInt(q[s]);
-	s = 'timeout'; if (q[s]) OFF_inactivity_timeout_override = parseFloat(q[s]);
-	s = 'gen'; if (q[s]) gen_freq = parseFloat(q[s]);
-	s = 'attn'; if (q[s]) gen_attn = parseInt(q[s]);
+	s = 'wf'; if (q[s]) wf_rate = q[s];
+	s = 'wfm'; if (q[s]) wf_mm = q[s];
 	s = 'cmap'; if (q[s]) colormap_select = parseInt(q[s]);
 	s = 'sqrt'; if (q[s]) colormap_sqrt = parseInt(q[s]);
-	s = 'wf'; if (q[s]) wf_rate = q[s];
+	s = 'peak'; if (q[s]) peak_initially = parseInt(q[s]);
+	s = 'no_geo'; if (q[s]) no_geoloc = true;
+	s = 'keys'; if (q[s]) shortcut.keys = q[s];
+
+   // development
+	s = 'sqth'; if (q[s]) squelch_threshold = parseFloat(q[s]);
+	s = 'click'; if (q[s]) nb_click = true;
+	s = 'nocache'; if (q[s]) { param_nocache = true; nocache = parseInt(q[s]); }
+	s = 'ncc'; if (q[s]) no_clk_corr = parseInt(q[s]);
 	s = 'wfdly'; if (q[s]) waterfall_delay = parseFloat(q[s]);
 	s = 'wf_comp'; if (q[s]) wf_compression = parseInt(q[s]);
+	s = 'gen'; if (q[s]) gen_freq = parseFloat(q[s]);
+	s = 'attn'; if (q[s]) gen_attn = parseInt(q[s]);
+	s = 'blen'; if (q[s]) audio_buffer_min_length_sec = parseFloat(q[s])/1000;
+	s = 'audio'; if (q[s]) audio_meas_dly_ena = parseFloat(q[s]);
 	s = 'gc'; if (q[s]) kiwi_gc = parseInt(q[s]);
 	s = 'gc_snd'; if (q[s]) kiwi_gc_snd = parseInt(q[s]);
 	s = 'gc_wf'; if (q[s]) kiwi_gc_wf = parseInt(q[s]);
 	s = 'gc_recv'; if (q[s]) kiwi_gc_recv = parseInt(q[s]);
 	s = 'gc_wspr'; if (q[s]) kiwi_gc_wspr = parseInt(q[s]);
-	s = 'nocache'; if (q[s]) { param_nocache = true; nocache = parseInt(q[s]); }
 	s = 'ctrace'; if (q[s]) { param_ctrace = true; ctrace = parseInt(q[s]); }
-	s = 'ncc'; if (q[s]) no_clk_corr = parseInt(q[s]);
-	s = 'click'; if (q[s]) nb_click = true;
+	s = 'mobile'; if (q[s]) mobile_laptop_test = true;
 	s = 'v'; if (q[s]) console.log('URL: debug_v = '+ (debug_v = q[s]));
-
-	if (muted_initially) toggle_mute();
 
 	if (kiwi_gc_snd == -1) kiwi_gc_snd = kiwi_gc;
 	if (kiwi_gc_wf == -1) kiwi_gc_wf = kiwi_gc;
 	if (kiwi_gc_recv == -1) kiwi_gc_recv = kiwi_gc;
 	if (kiwi_gc_wspr == -1) kiwi_gc_wspr = kiwi_gc;
 	console.log('GC: snd='+ kiwi_gc_snd +' wf='+ kiwi_gc_wf +' recv='+ kiwi_gc_recv +' wspr='+ kiwi_gc_wspr);
+	
+	if (wf_mm != '') {
+	   wf_mm = wf_mm.split(',');
+	   var m = parseInt(wf_mm[0]);
+	   if (!isNaN(m) && m >= -190 && m <= -30) override_min_dB = m;
+	   if (wf_mm.length >= 2) {
+	      m = parseInt(wf_mm[1]);
+	      if (!isNaN(m) && m >= -100 && m <= 20) override_max_dB = m;
+	   }
+	}
 
 	kiwi_xdLocalStorage_init();
 	kiwi_get_init_settings();
-	kiwi_geolocate();
+	if (!no_geoloc) kiwi_geolocate();
 
 	init_rx_photo();
 	right_click_menu_init();
+	keyboard_shortcut_init();
 	confirmation_panel_init();
 	ext_panel_init();
 	place_panels();
 	init_panels();
-	okay_waterfall_init = true;
+   okay_waterfall_init = true;
+	confirmation_panel_init2();
 	smeter_init();
-	extint_init();
 	time_display_setup('id-topbar-right-container');
 	
-	window.setTimeout(function() {window.setInterval(send_keepalive, 5000);}, 5000);
+	window.setInterval(send_keepalive, 5000);
 	window.addEventListener("resize", openwebrx_resize);
         
    if (param_nocache) {
@@ -224,7 +264,15 @@ function kiwi_main()
 	snd_send("SET squelch=0 max="+ squelch_threshold.toFixed(0));
 	snd_send("SET lms_denoise=0");
 	snd_send("SET lms_autonotch=0");
+
+   if (gen_attn != 0) {
+      var dB = gen_attn;
+      var ampl_gain = Math.pow(10, -dB/20);		// use the amplitude form since we are multipling a signal
+      gen_attn = 0x01ffff * ampl_gain;
+      console.log('### GEN dB='+ dB +' ampl_gain='+ ampl_gain +' attn='+ gen_attn +' / '+ gen_attn.toHex());
+   }
 	set_gen(gen_freq, gen_attn);
+
 	snd_send("SET mod=am low_cut=-4000 high_cut=4000 freq=1000");
 	set_agc();
 	snd_send("SET browser="+navigator.userAgent);
@@ -260,7 +308,8 @@ function init_panels()
 	init_panel_toggle(ptype.TOGGLE, 'id-control', false, popt.PERSIST);
 
 	var readme_firsttime = updateCookie('readme', 'seen2');
-	init_panel_toggle(ptype.TOGGLE, 'id-readme', false, (dbgUs || kiwi_isMobile())? popt.CLOSE : (readme_firsttime? popt.PERSIST : 7000), readme_color);
+	if (kiwi_isMobile()) readme_firsttime = false;     // don't show readme panel at all on mobile devices
+	init_panel_toggle(ptype.TOGGLE, 'id-readme', false, readme_firsttime? popt.PERSIST : popt.CLOSE, readme_color);
 
 	//init_panel_toggle(ptype.TOGGLE, 'id-msgs', true, kiwi_isMobile()? popt.CLOSE : popt.PERSIST);
 	//init_panel_toggle(ptype.POPUP, 'id-msgs', true, popt.CLOSE);
@@ -288,11 +337,13 @@ function init_panel_toggle(type, panel, scrollable, timeo, color)
 		var hide = rightSide? 'right':'left';
 		var show = rightSide? 'left':'right';
 		divVis.innerHTML =
-			'<a id="'+panel+'-hide" onclick="toggle_panel('+ q(panel) +');"><img src="icons/hide'+ hide +'.24.png" width="24" height="24" /></a>' +
-			'<a id="'+panel+'-show" class="class-vis-show" onclick="toggle_panel('+ q(panel) +');"><img src="icons/hide'+ show +'.24.png" width="24" height="24" /></a>';
+			'<a id="'+panel+'-hide" onclick="toggle_panel('+ sq(panel) +');"><img src="icons/hide'+ hide +'.24.png" width="24" height="24" /></a>' +
+			'<a id="'+panel+'-show" class="class-vis-show" onclick="toggle_panel('+ sq(panel) +');"><img src="icons/hide'+ show +'.24.png" width="24" height="24" /></a>';
 	} else {		// ptype.POPUP or ptype:HIDE
 		divVis.innerHTML =
-			'<a id="'+panel+'-close" onclick="toggle_panel('+ q(panel) +');"><img src="icons/close.24.png" width="24" height="24" /></a>';
+			'<a id="'+panel+'-close" onclick="toggle_panel('+ sq(panel) +');">' +
+			   '<img id='+ dq(panel +'-close-img') +' src="icons/close.24.png" width="24" height="24" />' +
+			'</a>';
 	}
 
 	var visOffset = divPanel.activeWidth - visIcon;
@@ -324,16 +375,19 @@ function init_panel_toggle(type, panel, scrollable, timeo, color)
 	}
 }
 
-function toggle_panel(panel)
+function toggle_panel(panel, set)
 {
 	var divPanel = w3_el(panel);
 	var divVis = w3_el(panel +'-vis');
-	//console.log('toggle_panel '+ panel +' ptype='+ divPanel.ptype);
+	//console.log('toggle_panel '+ panel +' ptype='+ divPanel.ptype +' panelShown='+ divPanel.panelShown);
+	
+	if (isDefined(set)) divPanel.panelShown = set ^ 1;    // ^1 because of inverted logic below
 
 	if (divPanel.ptype == ptype.POPUP) {
 		divPanel.style.visibility = divPanel.panelShown? 'hidden' : 'visible';
 		divPanel.panelShown ^= 1;
 		updateCookie(panel, 'seen');
+	   freqset_select();
 		return;
 	}
 	
@@ -356,7 +410,7 @@ function toggle_panel(panel)
 
 	var visOffset = divPanel.activeWidth - visIcon;
 	var visHoffset = (divPanel.scrollable)? -kiwi_scrollbar_width() : visBorder;
-	//console.log("toggle_panel "+panel+" right="+rightSide+" shown="+divPanel.panelShown);
+	console.log("toggle_panel "+panel+" right="+rightSide+" shown="+divPanel.panelShown);
 	if (rightSide)
 		divVis.style.right = px(divPanel.panelShown? 0 : (visOffset + visIcon + visBorder*2));
 	else
@@ -366,7 +420,7 @@ function toggle_panel(panel)
 
 function openwebrx_resize(a)
 {
-   a = (typeof a == 'string' && a.startsWith('orient'))? a : 'event';
+   a = (isString(a) && a.startsWith('orient'))? a : 'event';
 	resize_canvases();
 	resize_waterfall_container(true);
    extint_environment_changed( { resize:1 } );
@@ -374,13 +428,25 @@ function openwebrx_resize(a)
 	check_top_bar_congestion();
 }
 
+/*
+var orient = { cnt:0 };
 function orientation_change() {
    //openwebrx_resize('orient '+ orientation);
+   orient.AW = window.innerWidth;
+   orient.AH = window.innerHeight;
+   if (orient.cnt == 0) {
+      setTimeout(function() {    // timing matters on iphone-5S but not iPad-2!
+         alert('orient #'+ orient.cnt +' '+
+            orient.AW +','+ orient.AH +' '+ window.innerWidth +','+ window.innerHeight);
+         orient.cnt = 0;
+      }, 500);
+   } else orient.cnt++;
 }
 
 try {
    window.onorientationchange = orientation_change;
 } catch(ex) {}
+*/
 
 var offsetDiff_init = false;
 var p_left, p_owner, p_mid, p_right;
@@ -458,7 +524,7 @@ function init_rx_photo()
 	if (dbgUs || kiwi_isMobile()) {
 		close_rx_photo();
 	} else {
-		window.setTimeout(function() { close_rx_photo() },5000);
+		window.setTimeout(function() { close_rx_photo() },3000);
 	}
 }
 
@@ -500,38 +566,38 @@ function toggle_rx_photo()
 }
 
 
-// ========================================================
+////////////////////////////////
 // =================  >ANIMATION ROUTINES  ================
-// ========================================================
+////////////////////////////////
 
 function animate(object, style_name, unit, from, to, accel, time_ms, fps, to_exec)
 {
 	//console.log(object.className);
-	if(typeof to_exec=="undefined") to_exec=0;
+	if (isUndefined(to_exec)) to_exec=0;
 	object.style[style_name]=from.toString()+unit;
 	object.anim_i=0;
 	n_of_iters=time_ms/(1000/fps);
 	if (n_of_iters < 1) n_of_iters = 1;
 	change=(to-from)/(n_of_iters);
-	if(typeof object.anim_timer!="undefined") { window.clearInterval(object.anim_timer);  }
+	if (isDefined(object.anim_timer)) { window.clearInterval(object.anim_timer);  }
 
 	object.anim_timer = window.setInterval(
 		function(){
-			if(object.anim_i++<n_of_iters)
+			if (object.anim_i++<n_of_iters)
 			{
 				if (accel==1) object.style[style_name] = (parseFloat(object.style[style_name]) + change).toString() + unit;
 				else 
 				{ 
 					remain=parseFloat(object.style[style_name])-to;
-					if(Math.abs(remain)>9||unit!="px") new_val=(to+accel*remain);
-					else {if(Math.abs(remain)<2) new_val=to;
+					if (Math.abs(remain)>9||unit!="px") new_val=(to+accel*remain);
+					else {if (Math.abs(remain)<2) new_val=to;
 					else new_val=to+remain-(remain/Math.abs(remain));}
 					object.style[style_name]=new_val.toString()+unit;
 				}
 			}
 			else 
 				{object.style[style_name]=to.toString()+unit; window.clearInterval(object.anim_timer); delete object.anim_timer;}
-			if(to_exec!=0) to_exec();
+			if (to_exec!=0) to_exec();
 		},1000/fps);
 }
 
@@ -562,7 +628,7 @@ function style_value(of_what, which)
 	
 	something.fade_timer=window.setInterval(
 		function(){
-			if(something.fade_i++<n_of_iters)
+			if (something.fade_i++<n_of_iters)
 				something.style.opacity=parseFloat(something.style.opacity)+change;
 			else 
 				{something.style.opacity=to; window.clearInterval(something.fade_timer); }
@@ -570,9 +636,9 @@ function style_value(of_what, which)
 }*/
 
 
-// ========================================================
+////////////////////////////////
 // ================  >DEMODULATOR ROUTINES  ===============
-// ========================================================
+////////////////////////////////
 
 demodulators=[]
 
@@ -581,7 +647,7 @@ demodulator_colors=["#ffff00", "#00ff00", "#00ffff", "#058cff", "#ff9600", "#a1f
 
 function demodulators_get_next_color()
 {
-	if(demodulator_color_index>=demodulator_colors.length) demodulator_color_index=0;
+	if (demodulator_color_index>=demodulator_colors.length) demodulator_color_index=0;
 	return(demodulator_colors[demodulator_color_index++]);
 }
 
@@ -592,7 +658,7 @@ function demod_envelope_draw(range, from, to, color, line)
    // Envelope is drawn on the scale canvas.
 	// A "drag range" object is returned, containing information about the draggable areas of the envelope
 	// (beginning, ending and the line showing the offset frequency).
-	if(typeof color == "undefined") color="#ffff00"; //yellow
+	if (isUndefined(color)) color="#ffff00"; //yellow
 	
 	env_bounding_line_w=5;   //    
 	env_att_w=5;             //     _______   ___env_h2 in px   ___|_____
@@ -647,7 +713,7 @@ function demod_envelope_draw(range, from, to, color, line)
 		scale_ctx.stroke();
 	}
 	
-	if (typeof line != "undefined") // out of screen? 
+	if (isDefined(line)) // out of screen? 
 	{
 		line_px = scale_px_from_freq(line,range);
 		if (!(line_px<0 || line_px>window.innerWidth))
@@ -675,28 +741,28 @@ function demod_envelope_where_clicked(x, drag_ranges, key_modifiers)
 	//console.log(drag_ranges);
 	//console.log(key_modifiers);
 
-	if(key_modifiers.shiftKey)
+	if (key_modifiers.shiftKey)
 	{
 		//Check first: shift + center drag emulates BFO knob
-		if(drag_ranges.line_on_screen && in_range(x,drag_ranges.line)) return dr.bfo;
+		if (drag_ranges.line_on_screen && in_range(x,drag_ranges.line)) return dr.bfo;
 		
 		//Check second: shift + envelope drag emulates PBS knob
-		if(drag_ranges.envelope_on_screen && in_range(x,drag_ranges.whole_envelope)) return dr.pbs;
+		if (drag_ranges.envelope_on_screen && in_range(x,drag_ranges.whole_envelope)) return dr.pbs;
 	}
 	
-	if(key_modifiers.altKey)
+	if (key_modifiers.altKey)
 	{
-		if(drag_ranges.envelope_on_screen && in_range(x,drag_ranges.beginning)) return dr.bwlo;
-		if(drag_ranges.envelope_on_screen && in_range(x,drag_ranges.ending)) return dr.bwhi;
+		if (drag_ranges.envelope_on_screen && in_range(x,drag_ranges.beginning)) return dr.bwlo;
+		if (drag_ranges.envelope_on_screen && in_range(x,drag_ranges.ending)) return dr.bwhi;
 	}
 	
-	if(drag_ranges.envelope_on_screen)
+	if (drag_ranges.envelope_on_screen)
 	{ 
 		// For low and high cut:
-		if(in_range(x,drag_ranges.beginning)) return dr.beginning;
-		if(in_range(x,drag_ranges.ending)) return dr.ending;
+		if (in_range(x,drag_ranges.beginning)) return dr.beginning;
+		if (in_range(x,drag_ranges.ending)) return dr.ending;
 		// Last priority: having clicked anything else on the envelope, without holding the shift key
-		if(in_range(x,drag_ranges.whole_envelope)) return dr.anything_else; 
+		if (in_range(x,drag_ranges.whole_envelope)) return dr.anything_else; 
 	}
 	return dr.none; //User doesn't drag the envelope for this demodulator
 }
@@ -707,11 +773,11 @@ demodulator = function(offset_frequency)
 {
 	//console.log("this too");
 	this.offset_frequency = offset_frequency;
-	this.has_audio_output=true;
-	this.has_text_output=false;
-	this.envelope={};
-	this.color=demodulators_get_next_color();
-	this.stop=function(){};
+	this.has_audio_output = true;
+	this.has_text_output = false;
+	this.envelope = {};
+	this.color = demodulators_get_next_color();
+	this.stop = function(){};
 }
 
 //ranges on filter envelope that can be dragged:
@@ -734,16 +800,17 @@ demodulator_response_time=100;
 //in ms; if we don't limit the number of SETs sent to the server, audio will underrun (possibly output buffer is cleared on SETs in GNU Radio
 
 var passbands = {
-	am:		{ lo: -5000,	hi:  5000 },
+	am:		{ lo: -4900,	hi:  4900 },            // 9.8 kHz instead of 10 to avoid adjacent channel heterodynes in SW BCBs
 	amn:		{ lo: -2500,	hi:  2500 },
-	lsb:		{ lo: -2700,	hi:  -300 },	// cf = 1500 Hz, bw = 2400 Hz
-	usb:		{ lo:   300,	hi:  2700 },	// cf = 1500 Hz, bw = 2400 Hz
-	cw:		{ lo:   300,	hi:   700 },	// cf = 500 Hz, bw = 400 Hz
-	cwn:		{ lo:   470,	hi:   530 },	// cf = 500 Hz, bw = 60 Hz
-	nbfm:		{ lo: -6000,	hi:  6000 },	// FIXME: set based on current srate?
+	drm:		{ lo: -5000,	hi:  5000 },
+	lsb:		{ lo: -2700,	hi:  -300 },	         // cf = 1500 Hz, bw = 2400 Hz
+	lsn:		{ lo: -2400,	hi:  -300 },	         // cf = 1350 Hz, bw = 2100 Hz
+	usb:		{ lo:   300,	hi:  2700 },	         // cf = 1500 Hz, bw = 2400 Hz
+	usn:		{ lo:   300,	hi:  2400 },	         // cf = 1350 Hz, bw = 2100 Hz
+	cw:		{ lo:   300,	hi:   700,  pbw: 400 },	// cf = 500 Hz, bw = 400 Hz
+	cwn:		{ lo:   470,	hi:   530,  pbw:  60 },	// cf = 500 Hz, bw = 60 Hz
+	nbfm:		{ lo: -6000,	hi:  6000 },	         // FIXME: set based on current srate?
 	iq:		{ lo: -5000,	hi:  5000 },
-	s4285:	{ lo:   600,	hi:  3000 },	// cf = 1800 Hz, bw = 2400 Hz, s4285 compatible
-//	s4285:	{ lo:   400,	hi:  3200 },	// cf = 1800 Hz, bw = 2800 Hz, made things a little worse?
 };
 
 function demodulator_default_analog(offset_frequency, subtype, locut, hicut)
@@ -753,10 +820,10 @@ function demodulator_default_analog(offset_frequency, subtype, locut, hicut)
 	//http://stackoverflow.com/questions/4152931/javascript-inheritance-call-super-constructor-or-use-prototype-chain
 	demodulator.call(this, offset_frequency);
 
-	this.subtype=subtype;
+	this.subtype = subtype;
 	this.envelope.dragged_range = demodulator.draggable_ranges.none;
 	var sampleRateDiv2 = audio_input_rate? audio_input_rate/2 : 5000;
-	this.filter={
+	this.filter = {
 		min_passband: 4,
 		high_cut_limit: sampleRateDiv2,
 		low_cut_limit: -sampleRateDiv2
@@ -767,6 +834,9 @@ function demodulator_default_analog(offset_frequency, subtype, locut, hicut)
 	//Why? As the demodulation is done on the server, difference is mainly on the server side.
 	this.server_mode = subtype;
 
+//jks
+//if (!isNaN(locut)) { console.log('#### demodulator_default_analog locut='+ locut); kiwi_trace(); }
+//if (!isNaN(hicut)) { console.log('#### demodulator_default_analog hicut='+ hicut); kiwi_trace(); }
 	var lo = isNaN(locut)? passbands[subtype].last_lo : locut;
 	var hi = isNaN(hicut)? passbands[subtype].last_hi : hicut;
 	if (lo == 'undefined' || lo == null) {
@@ -776,58 +846,101 @@ function demodulator_default_analog(offset_frequency, subtype, locut, hicut)
 		hi = passbands[subtype].last_hi = passbands[subtype].hi;
 	}
 	
-	if (override_pbw) {
+	if (override_pbw != '') {
 	   var center = lo + (hi-lo)/2;
-	   lo = center - override_pbw/2;
-	   hi = center + override_pbw/2;
-	   console.log('override_pbw='+ override_pbw +' center='+ center +' hi='+ hi +' lo='+ lo);
-	   override_pbw = 0;
+	   var min = this.filter.min_passband;
+	   //console.log('### override_pbw cur_lo='+ lo +' cur_hi='+ hi +' cur_center='+ center +' min='+ min);
+	   override_pbw = decodeURIComponent(override_pbw);
+	   var p = override_pbw.split(',');
+	   console.log('p.len='+ p.length);
+	   var nlo = p[0].parseFloatWithUnits('k');
+      console.log('nlo="'+ p[0] +'" '+ nlo);
+	   var nhi = NaN;
+	   if (p.length > 1) {
+	      nhi = p[1].parseFloatWithUnits('k');
+         console.log('nhi="'+ p[1] +'" '+ nlo);
+      }
+	   
+	   // adjust passband width about current pb center
+	   if (p.length == 1 && !isNaN(nlo) && nlo >= min) {
+	      // /pbw
+         lo = center - nlo/2;
+         hi = center + nlo/2;
+	   } else
+	   if (p.length == 2 && !isNaN(nlo) && !isNaN(nhi) && nlo < nhi && (nhi - nlo) >= min) {
+	      // /pbl,pbh
+	      lo = nlo;
+	      hi = nhi;
+	   }
+	   //console.log('### override_pbw=['+ override_pbw +'] len='+ p.length +' nlo='+ nlo +' nhi='+ nhi +' lo='+ lo +' hi='+ hi);
+
+	   override_pbw = '';
 	}
 	
-	this.low_cut = lo;
-	this.high_cut = hi;
-	//console.log('DEMOD set lo='+ this.low_cut, ' hi='+ this.high_cut);
+	if (override_pbc != '') {
+	   var cpbhw = (hi - lo)/2;
+	   var cpbc = lo + cpbhw;
+	   var min = this.filter.min_passband;
+	   //console.log('### override_pbc cur_lo='+ lo +' cur_hi='+ hi +' cpbc='+ cpbc +' cpbhw='+ cpbhw +' min='+ min);
+	   override_pbc = decodeURIComponent(override_pbc);
+	   var p = override_pbc.split(',');
+	   var pbc = p[0].parseFloatWithUnits('k');
+      console.log('pbc="'+ p[0] +'" '+ nlo);
+	   var pbw = NaN;
+	   if (p.length > 1) {
+	      pbw = p[1].parseFloatWithUnits('k');
+         console.log('pbw="'+ p[1] +'" '+ nlo);
+      }
+	   
+      // adjust passband center using current or specified pb width
+	   if (p.length == 1 && !isNaN(pbc)) {
+	      // :pbc
+         lo = pbc - cpbhw;
+         hi = pbc + cpbhw;
+	   } else
+	   if (p.length == 2 && !isNaN(pbc) && !isNaN(pbw) && pbw >= min) {
+	      // :pbc,pbw
+         lo = pbc - pbw/2;
+         hi = pbc + pbw/2;
+	   }
+	   //console.log('### override_pbc=['+ override_pbc +'] len='+ p.length +' pbc='+ pbc +' pbw='+ pbw +' lo='+ lo +' hi='+ hi);
+
+	   override_pbc = '';
+	}
+	
+	this.low_cut = Math.max(lo, this.filter.low_cut_limit);
+	this.high_cut = Math.min(hi, this.filter.high_cut_limit);
+	//console.log('DEMOD set subtype='+ subtype +' lo='+ this.low_cut, ' hi='+ this.high_cut);
 	
 	this.usePBCenter = false;
 	this.isCW = false;
+	
+	switch (subtype) {
+	
+	   case 'am':
+	   case 'amn':
+	   case 'drm':
+	   case 'nbfm':
+	   case 'iq':
+		   break;
+		   
+	   case 'lsb':
+	   case 'lsn':
+	   case 'usb':
+	   case 'usn':
+		   this.usePBCenter = true;
+		   break;
 
-	if(subtype=="am")
-	{
-	}	
-	else if(subtype=="amn")
-	{
+	   case 'cw':
+	   case 'cwn':
+		   this.usePBCenter = true;
+		   this.isCW = true;
+		   break;
+		   
+		default:
+		   console.log('DEMOD-new: unknown subtype='+ subtype);
+		   break;
 	}
-	else if(subtype=="lsb")
-	{
-		this.usePBCenter=true;
-	}
-	else if(subtype=="usb")
-	{
-		this.usePBCenter=true;
-	}
-	else if(subtype=="cw")
-	{
-		this.usePBCenter=true;
-		this.isCW=true;
-	} 
-	else if(subtype=="cwn")
-	{
-		this.usePBCenter=true;
-		this.isCW=true;
-	} 
-	else if(subtype=="nbfm")
-	{
-	}
-	else if(subtype=="iq")
-	{
-	}
-	else if(subtype=="s4285")
-	{
-		// FIXME: hack for custom s4285 passband
-		this.usePBCenter=true;
-		this.server_mode='usb';
-	}
-	else console.log("DEMOD-new: unknown subtype="+subtype);
 
 	this.wait_for_timer = false;
 	this.set_after = false;
@@ -853,9 +966,37 @@ function demodulator_default_analog(offset_frequency, subtype, locut, hicut)
 	this.doset = function() {
 		//console.log('DOSET fcar='+freq_car_Hz);
 		//if (dbgUs && dbgUsFirst) { dbgUsFirst = false; console.trace(); }
-		snd_send("SET mod="+this.server_mode+
-			" low_cut="+this.low_cut.toString()+" high_cut="+this.high_cut.toString()+
-			" freq="+(freq_car_Hz/1000).toFixed(3));
+		
+		var freq = (freq_car_Hz/1000).toFixed(3);
+		var mode = this.server_mode;
+		var locut = this.low_cut.toString();
+		var hicut = this.high_cut.toString()
+		//console.log('SET mod='+ mode +' low_cut='+ locut +' high_cut='+ hicut +' freq='+ freq);
+		snd_send('SET mod='+ mode +' low_cut='+ locut +' high_cut='+ hicut +' freq='+ freq);
+
+      var changed = null;
+      if (freq != owrx.last_freq) {
+         changed = changed || {};
+         changed.freq = 1;
+         owrx.last_freq = freq;
+      }
+      if (mode != owrx.last_mode) {
+         changed = changed || {};
+         changed.mode = 1;
+         owrx.last_mode = mode;
+      }
+      if (locut != owrx.last_locut || hicut != owrx.last_hicut) {
+         changed = changed || {};
+         changed.passband = 1;
+         owrx.last_locut = locut; owrx.last_hicut = hicut;
+      }
+      if (changed != null) extint_environment_changed(changed);
+
+		if (muted_until_freq_set) {
+		   toggle_or_set_mute(muted_initially);
+		   muted_until_freq_set = false;
+		}
+		
 		if (audio_meas_dly_ena) {
 		   //console.log('audio_meas_dly_start');
 		   audio_meas_dly_start = (new Date()).getTime();
@@ -879,7 +1020,7 @@ function demodulator_default_analog(offset_frequency, subtype, locut, hicut)
 		pb_adj_lo_ttip.innerHTML = 'lo '+ this.parent.low_cut.toString() +', bw '+ bw.toString();
 		pb_adj_hi_ttip.innerHTML = 'hi '+ this.parent.high_cut.toString() +', bw '+ bw.toString();
 		pb_adj_cf_ttip.innerHTML = 'cf '+ (this.parent.low_cut + Math.abs(this.parent.high_cut - this.parent.low_cut)/2).toString();
-		pb_adj_car_ttip.innerHTML = ((center_freq + this.parent.offset_frequency)/1000).toFixed(2) +' kHz';
+		pb_adj_car_ttip.innerHTML = ((center_freq + this.parent.offset_frequency)/1000 + cfg.freq_offset).toFixed(2) +' kHz';
 	};
 
 	// event handlers
@@ -1000,7 +1141,7 @@ function demodulator_default_analog(offset_frequency, subtype, locut, hicut)
 		freqset_update_ui();
 
 		//will have to change this when changing to multi-demodulator mode:
-		//html("id-control-1").innerHTML=format_frequency("{x} MHz",center_freq+this.parent.offset_frequency,1e6,4);
+		//html("id-control-freq1").innerHTML=format_frequency("{x} MHz",center_freq+this.parent.offset_frequency,1e6,4);
 		return true;
 	};
 	
@@ -1037,25 +1178,27 @@ function demodulator_add(what)
 }
 
 function demodulator_analog_replace(subtype, freq)
-{ //this function should only exist until the multi-demodulator capability is added	
+{ //this function should only exist until the multi-demodulator capability is added
+   //console.log('demodulator_analog_replace subtype='+ subtype);
    if (passbands[subtype] == null) subtype = 'am';
 
 	var offset = 0, prev_pbo = 0, low_cut = NaN, high_cut = NaN;
 	var wasCW = false, toCW = false, fromCW = false;
 	
-	if(demodulators.length) {
+	if (demodulators.length) {
 		wasCW = demodulators[0].isCW;
 		offset = demodulators[0].offset_frequency;
 		prev_pbo = passband_offset();
 		demodulator_remove(0);
 	} else {
-		//console.log("### init_freq="+init_frequency+" init_mode="+init_mode);
-		offset = (init_frequency*1000).toFixed(0) - center_freq;
+		var i_freqHz = Math.round((init_frequency - cfg.freq_offset) * 1000);
+      offset = (i_freqHz <= 0 || i_freqHz > bandwidth)? 0 : (i_freqHz - center_freq);
+		//console.log('### init_freq='+ init_frequency +' cfg.freq_offset='+ cfg.freq_offset +' i_freqHz='+ i_freqHz +' offset='+ offset +' init_mode='+ init_mode);
 		subtype = init_mode;
 	}
 	
 	// initial offset, but doesn't consider demod.isCW since it isn't valid yet
-	if (freq != undefined) {
+	if (isArg(freq)) {
 		offset = freq - center_freq;
 	}
 	
@@ -1068,19 +1211,26 @@ function demodulator_analog_replace(subtype, freq)
 		fromCW = true;
 	
 	// determine actual offset now that demod.isCW is valid
-	if (freq != undefined) {
+	if (isArg(freq)) {
 		freq_car_Hz = freq_dsp_to_car(freq);
 		//console.log('DEMOD-replace SPECIFIED freq='+ freq +' car='+ freq_car_Hz);
 		offset = freq_car_Hz - center_freq;
+		audioFFT_clear_wf = true;
 	} else {
 		// Freq not changing, just mode. Do correct thing for switch to/from cw modes: keep display freq constant
 		var pbo = 0;
 		if (toCW) pbo = -passband_offset();
 		if (fromCW) pbo = prev_pbo;	// passband offset calculated _before_ demod was changed
 		offset += pbo;
-		//console.log('DEMOD-replace SAME freq='+ (offset + center_freq) +' PBO='+ pbo +' toCW='+ toCW +' fromCW='+ fromCW);
+		
+		// clear switching to/from cw mode because of frequency offset
+		if (toCW || fromCW)
+		   audioFFT_clear_wf = true;
+		//console.log('DEMOD-replace SAME freq='+ (offset + center_freq) +' PBO='+ pbo +' prev='+ prev_pbo +' toCW='+ toCW +' fromCW='+ fromCW);
 	}
-	
+
+   if (cur_mode != 'drm')
+      extint.prev_mode = cur_mode;
 	cur_mode = subtype;
 	//console.log("demodulator_analog_replace: cur_mode="+ cur_mode);
 
@@ -1094,7 +1244,7 @@ function demodulator_analog_replace(subtype, freq)
 
 function demodulator_set_offset_frequency(which, offset)
 {
-	if (offset>bandwidth/2 || offset<-bandwidth/2) return;
+	if (offset > bandwidth/2 || offset < -bandwidth/2) return;
 	offset = Math.round(offset);
 	//console.log("demodulator_set_offset_frequency: offset="+(offset + center_freq));
 	
@@ -1108,10 +1258,20 @@ function demodulator_set_offset_frequency(which, offset)
 	try_freqset_update_ui();
 }
 
+function owrx_cfg()
+{
+   var cw = passbands.cw;
+   cw.lo = cfg.init.cw_offset - cw.pbw/2;
+   cw.hi = cfg.init.cw_offset + cw.pbw/2;
+   var cwn = passbands.cwn;
+   cwn.lo = cfg.init.cw_offset - cwn.pbw/2;
+   cwn.hi = cfg.init.cw_offset + cwn.pbw/2;
+}
 
-// ========================================================
-// ===================  >SCALE  ===========================
-// ========================================================
+
+////////////////////////////////
+// scale
+////////////////////////////////
 
 var scale_ctx, band_ctx, dx_ctx;
 var pb_adj_cf, pb_adj_cf_ttip, pb_adj_lo, pb_adj_lo_ttip, pb_adj_hi, pb_adj_hi_ttip, pb_adj_car, pb_adj_car_ttip;
@@ -1119,6 +1279,8 @@ var scale_canvas, band_canvas, dx_div, dx_canvas;
 
 function scale_setup()
 {
+	w3_el('id-scale-container').addEventListener("mouseout", scale_container_mouseout, false);
+   
 	scale_canvas = html("id-scale-canvas");	
 	scale_ctx = scale_canvas.getContext("2d");
 	add_scale_listner(scale_canvas);
@@ -1189,7 +1351,7 @@ var scale_canvas_drag_params = {
 
 function scale_canvas_mousedown(evt)
 {
-	//console.log("SC-MDN");
+	//event_dump(evt, 'SC-MDN', 1);
 	with (scale_canvas_drag_params) {
 		drag = false;
 		start_x = evt.pageX;
@@ -1198,7 +1360,7 @@ function scale_canvas_mousedown(evt)
 		key_modifiers.altKey = evt.altKey;
 		key_modifiers.ctrlKey = evt.ctrlKey;
 	}
-	scale_canvas_start_drag(evt);
+	scale_canvas_start_drag(evt, 1);
 	evt.preventDefault();
 }
 
@@ -1213,14 +1375,14 @@ function scale_canvas_touchStart(evt)
 			key_modifiers.altKey = false;
 			key_modifiers.ctrlKey = false;
 		}
-	   scale_canvas_start_drag(evt);
+	   scale_canvas_start_drag(evt, 0);
 	}
 	evt.preventDefault();
 }
 
 var scale_canvas_ignore_mouse_event = false;
 
-function scale_canvas_start_drag(evt)
+function scale_canvas_start_drag(evt, isMouse)
 {
 	// Distinguish ctrl-click right-button meta event from actual right-button on mouse (or touchpad two-finger tap).
 	// Must ignore true_right_click case even though contextmenu event is being handled elsewhere.
@@ -1235,11 +1397,12 @@ function scale_canvas_start_drag(evt)
 	}
 
    scale_canvas_drag_params.mouse_down = true;
+   if (isMouse) scale_canvas_mousemove(evt);
 }
 
 function scale_offset_carfreq_from_px(x, visible_range)
 {
-	if (typeof visible_range === "undefined") visible_range = get_visible_freq_range();
+	if (isUndefined(visible_range)) visible_range = get_visible_freq_range();
 	var offset = passband_offset();
 	var f = visible_range.start + visible_range.bw*(x/canvas_container.clientWidth);
 	//console.log("SOCFFPX f="+f+" off="+offset+" f-o="+(f-offset)+" rtn="+(f - center_freq - offset));
@@ -1250,10 +1413,11 @@ function scale_canvas_drag(evt, x)
 {
    if (scale_canvas_ignore_mouse_event) return;
    
+	//event_dump(evt, 'SC-MDRAG', 1);
 	var event_handled = 0;
 	var relX = Math.abs(x - scale_canvas_drag_params.start_x);
 
-	if (scale_canvas_drag_params.mouse_down && !scale_canvas_drag_params.drag && relX > canvas_drag_min_delta) {
+	if (scale_canvas_drag_params.mouse_down && !scale_canvas_drag_params.drag /* && relX > canvas_drag_min_delta */ ) {
 		//we can use the main drag_min_delta thing of the main canvas
 		scale_canvas_drag_params.drag = true;
 		//call the drag_start for all demodulators (and they will decide if they're dragged, based on X coordinate)
@@ -1261,9 +1425,9 @@ function scale_canvas_drag(evt, x)
 			event_handled |= demodulators[i].envelope.drag_start(x, scale_canvas_drag_params.key_modifiers);
 		//console.log("MOV1 evh? "+event_handled);
 		evt.target.style.cursor = "move";
-		//evt.target.style.cursor = "ew-resize";
 		//console.log('sc cursor');
-	} else
+	//} else
+	}     // scale is different from waterfall: mousedown alone immediately changes frequency
 
 	if (scale_canvas_drag_params.drag) {
 		//call the drag_move for all demodulators (and they will decide if they're dragged)
@@ -1278,6 +1442,7 @@ function scale_canvas_drag(evt, x)
 
 function scale_canvas_mousemove(evt)
 {
+	//event_dump(evt, 'SC-MM', 1);
 	scale_canvas_drag(evt, evt.pageX);
 }
 
@@ -1297,20 +1462,21 @@ function scale_canvas_end_drag(evt, x)
    }
 
 	scale_canvas_drag_params.drag = false;
-	scale_canvas_drag_params.mouse_down = false;
 	var event_handled = false;
 	
-	for (var i=0;i<demodulators.length;i++) event_handled |= demodulators[i].envelope.drag_end(x);
-	//console.log("MED evh? "+event_handled);
-	if (!event_handled) demodulator_set_offset_frequency(0, scale_offset_carfreq_from_px(x));
+	if (scale_canvas_drag_params.mouse_down == true) {
+      for (var i=0; i<demodulators.length; i++) event_handled |= demodulators[i].envelope.drag_end(x);
+      //console.log("MED evh? "+event_handled);
+      if (!event_handled) demodulator_set_offset_frequency(0, scale_offset_carfreq_from_px(x));
+   }
 
+	scale_canvas_drag_params.mouse_down = false;
 	evt.target.style.cursor = null;		// re-enable default mouseover cursor in .css (if any)
 }
 
 function scale_canvas_mouseup(evt)
 {
-	//console.log("SC-MUP");
-	//console.log('sc default');
+	//event_dump(evt, 'SC-MUP', 1);
 	scale_canvas_end_drag(evt, evt.pageX);
 }
 
@@ -1320,18 +1486,50 @@ function scale_canvas_touchEnd(evt)
 	evt.preventDefault();
 }
 
+// When mouseup occurs outside our original canvas scale_canvas_mouseup() doesn't occur terminating the drag.
+// So have to detect canvas crossing and terminate that way.
+function scale_container_mouseout(evt)
+{
+   // Prevent mouseout generated from mouseover of passband elements from prematurely ending drag.
+   // Can't use "pb_el.style.pointerEvents = 'none'" trick because that disables pb tooltip.
+   var trel = evt.relatedTarget;
+   trel = (isObject(trel) && trel != null && isDefined(trel.id))? trel.id : null;
+   if (trel && (trel.startsWith('id-pb-adj') || trel.startsWith('id-scale'))) return;
+   scale_canvas_mouseup(evt);
+}
+
 function scale_px_from_freq(f,range) { return Math.round(((f-range.start)/range.bw)*canvas_container.clientWidth); }
 
 function get_visible_freq_range()
 {
 	out={};
-	var bins = bins_at_cur_zoom();
-	out.start = bin_to_freq(x_bin);
-	out.center = bin_to_freq(x_bin + bins/2);
-	out.end = bin_to_freq(x_bin + bins);
-	out.bw = out.end-out.start;
-	out.hpp = out.bw / scale_canvas.clientWidth;
-	//console.log("GVFR z="+zoom_level+" xb="+x_bin+" BACZ="+bins+" s="+out.start+" c="+out.center+" e="+out.end+" bw="+out.bw+" hpp="+out.hpp+" cw="+scale_canvas.clientWidth);
+	
+	if (audioFFT_active && cur_mode != undefined) {
+	   var off, span;
+      var srate = Math.round(audio_input_rate || 12000);
+	   if (cur_mode == 'iq' || cur_mode == 'drm') {
+	      off = 0;
+	      span = srate;
+	   } else {
+	      off = srate/4;
+	      span = srate/2;
+	   }
+      out.center = center_freq + demodulators[0].offset_frequency + off;
+      out.start = out.center - span;
+      out.end = out.center + span;
+      x_bin = freq_to_bin(out.start);
+      out.bw = out.end-out.start;
+      out.hpp = out.bw / scale_canvas.clientWidth;
+	   //console.log('GVFR'+ (audioFFT_active? '(audioFFT)':'') +" mode="+cur_mode+" xb="+x_bin+" s="+out.start+" c="+out.center+" e="+out.end+" bw="+out.bw+" hpp="+out.hpp+" cw="+scale_canvas.clientWidth);
+	} else {
+	   var bins = bins_at_cur_zoom();
+      out.start = bin_to_freq(x_bin);
+      out.center = bin_to_freq(x_bin + bins/2);
+      out.end = bin_to_freq(x_bin + bins);
+      out.bw = out.end-out.start;
+      out.hpp = out.bw / scale_canvas.clientWidth;
+	   //console.log("GVFR z="+zoom_level+" xb="+x_bin+" BACZ="+bins+" s="+out.start+" c="+out.center+" e="+out.end+" bw="+out.bw+" hpp="+out.hpp+" cw="+scale_canvas.clientWidth);
+	}
 	return out;
 }
 
@@ -1513,7 +1711,7 @@ function mk_freq_scale()
 
 	scale_ctx.clearRect(0,22,scale_ctx.canvas.width,scale_ctx.canvas.height-22);
 	scale_ctx.strokeStyle = "#fff";
-	scale_ctx.font = "bold 11px sans-serif";
+	scale_ctx.font = "bold 12px sans-serif";
 	scale_ctx.textBaseline = "top";
 	scale_ctx.fillStyle = "#fff";
 	
@@ -1548,7 +1746,7 @@ function mk_freq_scale()
 		if (marker_hz % spacing.params.hz_per_large_marker == 0) {
 
 			//large marker
-			if (typeof first_large == "undefined") var first_large = marker_hz; 
+			if (isUndefined(first_large)) var first_large = marker_hz; 
 			last_large = marker_hz;
 			scale_ctx.lineWidth = 3.5;
 			scale_ctx.lineTo(x,22+11);
@@ -1682,16 +1880,15 @@ function mkscale()
 	mk_freq_scale();
 	mk_bands_scale();
 	//mk_spurs();
-   extint_environment_changed( { passband:1 } );
 }
 
 
-// ========================================================
-// =================== >CONVERSIONS =======================
-// ========================================================
+////////////////////////////////
+// conversions
+////////////////////////////////
 
 // A "bin" is the wf_fft_size multiplied by the maximum zoom factor.
-// So there are approx 1024 * 2^11 = 2M bins.
+// So there are approx 1024 * 2^14 = 16M bins.
 // The left edge of the waterfall is specified with a bin number.
 // The higher precision of having a large number of bins makes the code simpler.
 // Remember that the actual displayed waterfall_width is typically larger than the
@@ -1765,7 +1962,7 @@ function clamp_xbin(xbin)
 
 function passband_visible()
 {
-	if (typeof demodulators[0] == "undefined") return x_bin;	// punt if no demod yet
+	if (isUndefined(demodulators[0])) return x_bin;	// punt if no demod yet
 	var f = freq_passband_center();
 	var pb_bin = freq_to_bin(f);
 	//console.log("PBV f="+f+" x_bin="+x_bin+" BACZ="+bins_at_cur_zoom()+" max_bin="+(x_bin+bins_at_cur_zoom())+" pb_bin="+pb_bin);
@@ -1775,9 +1972,9 @@ function passband_visible()
 }
 
 
-// ========================================================
-// ======================== >CANVAS =======================
-// ========================================================
+////////////////////////////////
+// canvas
+////////////////////////////////
 
 function canvas_contextmenu(evt)
 {
@@ -1787,26 +1984,46 @@ function canvas_contextmenu(evt)
 		// TBD: popup menu with database lookup, etc.
 	}
 	
+	// let ctrl-dx_click thru
+	if (evt && evt.currentTarget && evt.currentTarget.id == 'id-dx-container') {
+	   //console.log('canvas_contextmenu: synthetic ctrl-dx_click');
+	   dx.ctrl_click = true;
+	   w3_el(evt.target.id).click();
+	}
+	
+	// must always cancel even so system context menu doesn't appear
 	return cancelEvent(evt);
 }
 
 function canvas_mouseover(evt)
 {
-	if(!waterfall_setup_done) return;
+	if (!waterfall_setup_done) return;
 	//html("id-freq-show").style.visibility="visible";	
 }
 
 function canvas_mouseout(evt)
 {
-	if(!waterfall_setup_done) return;
+	if (!waterfall_setup_done) return;
+	if (debug_canvas_drag) event_dump(evt, 'canvas_mouseout', 1);
 	//html("id-freq-show").style.visibility="hidden";
 }
 
 function canvas_get_carfreq_offset(relativeX, incl_PBO)
 {
-	var norm = relativeX/waterfall_width;
-	var bin = x_bin + norm * bins_at_cur_zoom();
-	var freq = bin_to_freq(bin);
+   var freq;
+   var norm = relativeX/waterfall_width;
+   if (audioFFT_active) {
+      var cur = center_freq + demodulators[0].offset_frequency;
+      var iq_or_drm = (cur_mode == 'iq' || cur_mode == 'drm');
+      norm -= iq_or_drm? 0.5 : 0.25;
+      var incr = norm * audio_input_rate * (iq_or_drm? 2 : 1);
+      freq = cur + incr;
+      //console.log('canvas_get_carfreq_offset(audioFFT) f='+ freq +' cur='+ cur +' incr='+ incr +' norm='+ norm);
+   } else {
+      var bin = x_bin + norm * bins_at_cur_zoom();
+      freq = bin_to_freq(bin);
+      //console.log('canvas_get_carfreq_offset f='+ freq +' bin='+ bin +' norm='+ norm);
+   }
 	var offset = incl_PBO? passband_offset() : 0;
 	var f = Math.round(freq - offset);
 	var cfo = f - (bandwidth/2);
@@ -1825,6 +2042,292 @@ canvas_mouse_down = false;
 canvas_ignore_mouse_event = false;
 
 var mouse = { 'left':0, 'middle':1, 'right':2 };
+
+var debug_canvas_drag = false;
+
+function canvas_start_drag(evt, x, y)
+{
+	var dump_event = false;
+	
+	// Distinguish ctrl-click right-button meta event from actual right-button on mouse (or touchpad two-finger tap).
+	// Must ignore true_right_click case even though contextmenu event is being handled elsewhere.
+	var true_right_click = false;
+	if (evt.button == mouse.right && !evt.ctrlKey) {
+		//dump_event = true;
+		true_right_click = true;
+		canvas_ignore_mouse_event = true;
+		right_click_menu(x, y);
+		return;
+	}
+	
+	if (dump_event) event_dump(evt, "MDN");
+
+	if (evt.shiftKey && evt.target.id == 'id-dx-container') {
+		canvas_ignore_mouse_event = true;
+		dx_show_edit_panel(evt, -1);
+	} else
+
+	// select waterfall on nearest appropriate boundary (1, 5 or 9/10 kHz depending on band)
+	if (evt.shiftKey && !(evt.ctrlKey || evt.altKey)) {
+		canvas_ignore_mouse_event = true;
+		var step_Hz = 1000;
+		var fold = canvas_get_dspfreq(x);
+		var b = find_band(fold);
+		var cm = cur_mode.substr(0,2);
+		var am_ssb_iq_drm = (cm == 'am' || cm == 'ls' || cm == 'us' || cm == 'iq' || cm == 'dr');
+		//console_log('nearest', cm, am_ssb_iq_drm);
+	   var ITU_region = cfg.init.ITU_region + 1;
+	   var ham_80m_swbc_75m_overlap = (ITU_region == 2 && b.name == '75m');
+
+		if (b != null && (b.name == 'LW' || b.name == 'MW')) {
+			if (am_ssb_iq_drm) {
+				step_Hz = step_9_10? 9000 : 10000;
+				//console.log('SFT-CLICK 9_10');
+			}
+		} else
+		if (b != null && (b.s == svc.B) && !ham_80m_swbc_75m_overlap) {      // SWBC bands
+			if (am_ssb_iq_drm) {
+				step_Hz = 5000;
+				//console.log('SFT-CLICK SWBC');
+			}
+		}
+		
+		var trunc = fold / step_Hz;
+		var fnew = Math.round(trunc) * step_Hz;
+		//console.log('SFT-CLICK '+cur_mode+' fold='+fold+' step='+step_Hz+' trunc='+trunc+' fnew='+fnew);
+		freqmode_set_dsp_kHz(fnew/1000, null);
+	} else
+
+	// lookup mouse pointer frequency in online resource appropriate to the frequency band
+	if (evt.shiftKey && (evt.ctrlKey || evt.altKey)) {
+		canvas_ignore_mouse_event = true;
+		freq_database_lookup(canvas_get_dspfreq(x), evt.altKey);
+	} else
+	
+	// page scrolling via ctrl & alt-key click
+	if (evt.ctrlKey) {
+		canvas_ignore_mouse_event = true;
+		page_scroll(-page_scroll_amount);
+	} else
+	
+	if (evt.altKey) {
+		canvas_ignore_mouse_event = true;
+		page_scroll(page_scroll_amount);
+	}
+	
+	canvas_mouse_down = true;
+	canvas_dragging = false;
+	canvas_drag_last_x = canvas_drag_start_x = x;
+	canvas_drag_last_y = canvas_drag_start_y = y;
+}
+
+function canvas_mousedown(evt)
+{
+	if (debug_canvas_drag) console.log("C-MD");
+   //event_dump(evt, "C-MD");
+	canvas_start_drag(evt, evt.pageX, evt.pageY);
+	evt.preventDefault();	// don't show text selection mouse pointer
+}
+
+function canvas_touchStart(evt)
+{
+   if (evt.targetTouches.length == 1) {
+		canvas_start_drag(evt, evt.targetTouches[0].pageX, evt.targetTouches[0].pageY);
+   /*
+		owrx.touch_pending_start_drag = true;
+		owrx.touch_pending_evt = evt;
+
+      owrx.touch_hold_start = (new Date()).getTime();
+      owrx.touch_hold_pressed = true;
+      owrx.touch_hold_interval =
+         setInterval(function() {
+            if ((new Date()).getTime() - owrx.touch_hold_start > 750) {
+               owrx.touch_hold_pressed = owrx.touch_pending_start_drag = false;
+               kiwi_clearInterval(owrx.touch_hold_interval);
+               alert(evt.targetTouches[0].pageX +' '+ evt.targetTouches[0].pageY +' '+ evt.target.id);
+               canvas_start_drag(touch_pending_evt, evt.targetTouches[0].pageX, evt.targetTouches[0].pageY);
+            }
+         }, 200);
+	*/
+	}
+	
+	evt.preventDefault();	// don't show text selection mouse pointer
+}
+
+function spectrum_tooltip_update(evt, clientX, clientY)
+{
+	var target = (evt.target == spectrum_dB || evt.currentTarget == spectrum_dB || evt.target == spectrum_dB_ttip || evt.currentTarget == spectrum_dB_ttip);
+	//console.log('CD '+ target +' x='+ clientX +' tgt='+ evt.target.id +' ctg='+ evt.currentTarget.id);
+	//if (kiwi_isMobile()) alert('CD '+ tf +' x='+ clientX +' tgt='+ evt.target.id +' ctg='+ evt.currentTarget.id);
+
+	if (target) {
+		//event_dump(evt, 'SPEC');
+		
+		// This is a little tricky. The tooltip text span must be included as an event target so its position will update when the mouse
+		// is moved upward over it. But doing so means when the cursor goes below the bottom of the tooltip container, the entire
+		// spectrum div in this case, having included the tooltip text span will cause it to be re-positioned again. And the hover
+		// doesn't go away unless the mouse is moved quickly. So to stop this we need to manually detect when the mouse is out of the
+		// tooltip container and stop updating the tooltip text position so the hover will end.
+		
+		if (clientY >= 0 && clientY < height_spectrum_canvas) {
+			spectrum_dB_ttip.style.left = px(clientX);
+			spectrum_dB_ttip.style.bottom = px(200 + 10 - clientY);
+			var dB = (((height_spectrum_canvas - clientY) / height_spectrum_canvas) * full_scale) + mindb;
+			spectrum_dB_ttip.innerHTML = dB.toFixed(0) +' dBm';
+		}
+	}
+}
+
+function canvas_drag(evt, x, y, clientX, clientY)
+{
+	if (!waterfall_setup_done) return;
+	//element=html("id-freq-show");
+	var relativeX = x;
+	var relativeY = y;
+	spectrum_tooltip_update(evt, clientX, clientY);
+
+   if (debug_canvas_drag) console.log('CMD='+ canvas_mouse_down +' IME='+ canvas_ignore_mouse_event +' DG='+ canvas_dragging);
+	if (canvas_mouse_down && !canvas_ignore_mouse_event) {
+		if (!canvas_dragging && Math.abs(x - canvas_drag_start_x) > canvas_drag_min_delta) {
+			canvas_dragging = true;
+			canvas_container.style.cursor = "move";
+		}
+		if (canvas_dragging) {
+			var deltaX = canvas_drag_last_x - x;
+			var deltaY = canvas_drag_last_y - y;
+
+			var dbins = norm_to_bins(deltaX / waterfall_width);
+			waterfall_pan_canvases(dbins);
+
+			canvas_drag_last_x = x;
+			canvas_drag_last_y = y;
+		}
+	} else {
+		w3_innerHTML('id-mouse-unit', format_frequency("{x}", canvas_get_dspfreq(relativeX) + cfg.freq_offset*1e3, 1e3, 2));
+		//console.log("MOU rX="+relativeX.toFixed(1)+" f="+canvas_get_dspfreq(relativeX).toFixed(1));
+	}
+}
+
+function canvas_mousemove(evt)
+{
+	//if (debug_canvas_drag) console.log("C-MM");
+   //event_dump(evt, "C-MM");
+	canvas_drag(evt, evt.pageX, evt.pageY, evt.clientX, evt.clientY);
+}
+
+function canvas_touchMove(evt)
+{
+	for (var i=0; i < evt.touches.length; i++) {
+		var x = evt.touches[i].pageX;
+		var y = evt.touches[i].pageY;
+
+   /*
+      // any movement cancels touch hold
+      if (owrx.touch_hold_pressed) {
+         owrx.touch_hold_pressed = false;
+         kiwi_clearInterval(owrx.touch_hold_interval);
+      }
+
+      if (owrx.touch_pending_start_drag) {
+		   canvas_start_drag(evt, x, y);
+         owrx.touch_pending_start_drag = false;
+      }
+   */
+   
+		canvas_drag(evt, x, y, x, y);
+	}
+	evt.preventDefault();
+}
+
+function canvas_end_drag2()
+{
+	if (debug_canvas_drag) { console.log("C-ED2"); }
+	canvas_container.style.cursor = "crosshair";
+	canvas_mouse_down = false;
+	canvas_ignore_mouse_event = false;
+}
+
+// When mouseup occurs outside our original canvas canvas_mouseup() doesn't occur terminating the drag.
+// So have to detect canvas crossing and terminate that way.
+function canvas_container_mouseout(evt)
+{
+	if (debug_canvas_drag) event_dump(evt, "canvas_container_mouseout", 1);
+	canvas_end_drag2();
+}
+
+function canvas_end_drag(evt, x)
+{
+	if (!waterfall_setup_done) return;
+	//console.log("MUP "+this.id+" ign="+canvas_ignore_mouse_event);
+	var relativeX = x;
+
+	if (canvas_ignore_mouse_event) {
+	   //console.log('## canvas_ignore_mouse_event');
+		//ignore_next_keyup_event = true;
+	} else {
+		if (!canvas_dragging) {
+			//event_dump(evt, "MUP");
+			
+			// don't set freq if mouseup without mousedown due to move into canvas from elsewhere
+			if (canvas_mouse_down)
+			   demodulator_set_offset_frequency(0, canvas_get_carfreq_offset(relativeX, true));		
+		} else {
+			canvas_end_drag2();
+		}
+	}
+	
+	if (debug_canvas_drag) { console.log("C-ED"); }
+	canvas_mouse_down = false;
+	canvas_ignore_mouse_event = false;
+}
+
+function canvas_mouseup(evt)
+{
+	if (debug_canvas_drag) console.log("C-MU");
+   //event_dump(evt, "C-MU");
+	canvas_end_drag(evt, evt.pageX);
+}
+
+function canvas_touchEnd(evt)
+{
+	canvas_end_drag(evt, canvas_drag_last_x);
+/*
+   owrx.touch_hold_pressed = false;
+   kiwi_clearInterval(owrx.touch_hold_interval);
+*/
+	spectrum_tooltip_update(evt, canvas_drag_last_x, canvas_drag_last_y);
+	evt.preventDefault();
+}
+
+var canvas_mousewheel_rlimit = kiwi_rateLimit(canvas_mousewheel_cb, 170);
+
+function canvas_mousewheel(evt)
+{
+   canvas_mousewheel_rlimit(evt);
+	evt.preventDefault();	
+}
+
+function canvas_mousewheel_cb(evt)
+{
+	if (!waterfall_setup_done) return;
+	//console.log(evt);
+   zoom_step((evt.deltaY < 0)? ext_zoom.IN : ext_zoom.OUT, evt.pageX);
+	
+	/*
+   // scaling value is a scrolling sensitivity compromise between wheel mice and
+   // laptop trackpads (and also Apple trackpad mice)
+	zoom_level_f += evt.deltaY * -0.05;
+	zoom_level_f = Math.max(Math.min(zoom_level_f, zoom_levels_max), 0);
+	//console.log('mousewheel '+ zoom_level_f.toFixed(1));
+	//w3_innerHTML('id-owner-info', 'mousewheel '+ zoom_level_f.toFixed(2) +' '+ evt.deltaY);
+	zoom_step(ext_zoom.WHEEL, evt.pageX);
+	*/
+}
+
+
+////////////////////////////////
+// right click menu
+////////////////////////////////
 
 function right_click_menu_init()
 {
@@ -1852,6 +2355,7 @@ function right_click_menu(x, y)
       '<hr>',
       'restore passband',
       'save waterfall as JPG',
+      'DX label filter',
       '<hr>',
       '<i>cal ADC clock (admin)</i>'
    );
@@ -1880,7 +2384,11 @@ function right_click_menu_cb(idx, x)
       export_waterfall(canvas_get_dspfreq(x));
       break;
    
-   case 5:  // cal ADC clock
+   case 5:
+      dx_filter();
+      break;
+   
+   case 6:  // cal ADC clock
       admin_pwd_query(function() {
          var r1k_kHz = Math.round(freq_displayed_Hz / 1e3);     // 1kHz windows on 1 kHz boundaries
          var r1k_Hz = r1k_kHz * 1e3;
@@ -2033,235 +2541,15 @@ function export_waterfall(Hz) {
     document.body.removeChild(dlLink);
 }
 
-function canvas_start_drag(evt, x, y)
-{
-	var dump_event = false;
-	
-	// Distinguish ctrl-click right-button meta event from actual right-button on mouse (or touchpad two-finger tap).
-	// Must ignore true_right_click case even though contextmenu event is being handled elsewhere.
-	var true_right_click = false;
-	if (evt.button == mouse.right && !evt.ctrlKey) {
-		//dump_event = true;
-		true_right_click = true;
-		canvas_ignore_mouse_event = true;
-		right_click_menu(x, y);
-		return;
-	}
-	
-	if (dump_event)
-		event_dump(evt, "MDN");
 
-	if (evt.shiftKey && evt.target.id == 'id-dx-container') {
-		canvas_ignore_mouse_event = true;
-		dx_show_edit_panel(evt, -1);
-	} else
-
-	// select waterfall on nearest appropriate boundary (1, 5 or 9/10 kHz depending on band)
-	if (evt.shiftKey && !(evt.ctrlKey || evt.altKey)) {
-		canvas_ignore_mouse_event = true;
-		var step_Hz = 1000;
-		var fold = canvas_get_dspfreq(x);
-		var b = find_band(fold);
-		if (b != null && (b.name == 'LW' || b.name == 'MW')) {
-			if (cur_mode == 'am' || cur_mode == 'amn' || cur_mode == 'lsb' || cur_mode == 'usb') {
-				step_Hz = step_9_10? 9000 : 10000;
-				//console.log('SFT-CLICK 9_10');
-			}
-		} else
-		if (b != null && (b.s == svc.B)) {		// SWBC bands
-			if (cur_mode == 'am' || cur_mode == 'amn' || cur_mode == 'lsb' || cur_mode == 'usb') {
-				step_Hz = 5000;
-				//console.log('SFT-CLICK SWBC');
-			}
-		}
-		
-		var trunc = fold / step_Hz;
-		var fnew = Math.round(trunc) * step_Hz;
-		//console.log('SFT-CLICK '+cur_mode+' fold='+fold+' step='+step_Hz+' trunc='+trunc+' fnew='+fnew);
-		freqmode_set_dsp_kHz(fnew/1000, null);
-	} else
-
-	// lookup mouse pointer frequency in online resource appropriate to the frequency band
-	if (evt.shiftKey && (evt.ctrlKey || evt.altKey)) {
-		canvas_ignore_mouse_event = true;
-		freq_database_lookup(canvas_get_dspfreq(x), evt.altKey);
-	} else
-	
-	// page scrolling via ctrl & alt-key click
-	if (evt.ctrlKey) {
-		canvas_ignore_mouse_event = true;
-		page_scroll(-page_scroll_amount);
-	} else
-	
-	if (evt.altKey) {
-		canvas_ignore_mouse_event = true;
-		page_scroll(page_scroll_amount);
-	}
-	
-	canvas_mouse_down = true;
-	canvas_dragging = false;
-	canvas_drag_last_x = canvas_drag_start_x = x;
-	canvas_drag_last_y = canvas_drag_start_y = y;
-}
-
-function canvas_mousedown(evt)
-{
-	//console.log("C-MD");
-   //event_dump(evt, "C-MD");
-	canvas_start_drag(evt, evt.pageX, evt.pageY);
-	evt.preventDefault();	// don't show text selection mouse pointer
-}
-
-function canvas_touchStart(evt)
-{
-   if (evt.targetTouches.length == 1) {
-		canvas_start_drag(evt, evt.targetTouches[0].pageX, evt.targetTouches[0].pageY);
-	}
-	evt.preventDefault();	// don't show text selection mouse pointer
-}
-
-function spectrum_tooltip_update(evt, clientX, clientY)
-{
-	var target = (evt.target == spectrum_dB || evt.currentTarget == spectrum_dB || evt.target == spectrum_dB_ttip || evt.currentTarget == spectrum_dB_ttip);
-	//console.log('CD '+ target +' x='+ clientX +' tgt='+ evt.target.id +' ctg='+ evt.currentTarget.id);
-	//if (kiwi_isMobile()) alert('CD '+ tf +' x='+ clientX +' tgt='+ evt.target.id +' ctg='+ evt.currentTarget.id);
-
-	if (target) {
-		//event_dump(evt, 'SPEC');
-		
-		// This is a little tricky. The tooltip text span must be included as an event target so its position will update when the mouse
-		// is moved upward over it. But doing so means when the cursor goes below the bottom of the tooltip container, the entire
-		// spectrum div in this case, having included the tooltip text span will cause it to be re-positioned again. And the hover
-		// doesn't go away unless the mouse is moved quickly. So to stop this we need to manually detect when the mouse is out of the
-		// tooltip container and stop updating the tooltip text position so the hover will end.
-		
-		if (clientY >= 0 && clientY < height_spectrum_canvas) {
-			spectrum_dB_ttip.style.left = px(clientX);
-			spectrum_dB_ttip.style.bottom = px(200 + 10 - clientY);
-			var dB = (((height_spectrum_canvas - clientY) / height_spectrum_canvas) * full_scale) + mindb;
-			spectrum_dB_ttip.innerHTML = dB.toFixed(0) +' dBm';
-		}
-	}
-}
-
-function canvas_drag(evt, x, y, clientX, clientY)
-{
-	if (!waterfall_setup_done) return;
-	//element=html("id-freq-show");
-	var relativeX = x;
-	var relativeY = y;
-	spectrum_tooltip_update(evt, clientX, clientY);
-
-	if (canvas_mouse_down && !canvas_ignore_mouse_event) {
-		if (!canvas_dragging && Math.abs(x - canvas_drag_start_x) > canvas_drag_min_delta) {
-			canvas_dragging = true;
-			canvas_container.style.cursor = "move";
-			//console.log('cc move');
-		}
-		if (canvas_dragging) {
-			var deltaX = canvas_drag_last_x - x;
-			var deltaY = canvas_drag_last_y - y;
-
-			var dbins = norm_to_bins(deltaX / waterfall_width);
-			waterfall_pan_canvases(dbins);
-
-			canvas_drag_last_x = x;
-			canvas_drag_last_y = y;
-		}
-	} else {
-		w3_innerHTML('id-mouse-unit', format_frequency("{x}", canvas_get_dspfreq(relativeX) + cfg.freq_offset*1e3, 1e3, 2));
-		//console.log("MOU rX="+relativeX.toFixed(1)+" f="+canvas_get_dspfreq(relativeX).toFixed(1));
-	}
-}
-
-function canvas_mousemove(evt)
-{
-	//console.log("C-MM");
-   //event_dump(evt, "C-MM");
-	canvas_drag(evt, evt.pageX, evt.pageY, evt.clientX, evt.clientY);
-}
-
-function canvas_touchMove(evt)
-{
-	for (var i=0; i < evt.touches.length; i++) {
-		var x = evt.touches[i].pageX;
-		var y = evt.touches[i].pageY;
-		canvas_drag(evt, x, y, x, y);
-	}
-	evt.preventDefault();
-}
-
-function canvas_end_drag2()
-{
-	canvas_container.style.cursor = "crosshair";
-	canvas_mouse_down = false;
-	canvas_ignore_mouse_event = false;
-}
-
-function canvas_container_mouseout(evt)
-{
-	canvas_end_drag2();
-}
-
-//function body_mouseup() { canvas_end_drag2(); console.log("body_mouseup"); }
-//function window_mouseout() { canvas_end_drag2(); console.log("document_mouseout"); }
-
-function canvas_end_drag(evt, x)
-{
-	if (!waterfall_setup_done) return;
-	//console.log("MUP "+this.id+" ign="+canvas_ignore_mouse_event);
-	var relativeX = x;
-
-	if (canvas_ignore_mouse_event) {
-	   //console.log('## canvas_ignore_mouse_event');
-		ignore_next_keyup_event = true;
-	} else {
-		if (!canvas_dragging) {
-			//event_dump(evt, "MUP");
-			demodulator_set_offset_frequency(0, canvas_get_carfreq_offset(relativeX, true));		
-		} else {
-			canvas_end_drag2();
-		}
-	}
-	
-	canvas_mouse_down = false;
-	canvas_ignore_mouse_event = false;
-}
-
-function canvas_mouseup(evt)
-{
-	//console.log("C-MU");
-   //event_dump(evt, "C-MU");
-	canvas_end_drag(evt, evt.pageX);
-}
-
-function canvas_touchEnd(evt)
-{
-	canvas_end_drag(evt, canvas_drag_last_x);
-	spectrum_tooltip_update(evt, canvas_drag_last_x, canvas_drag_last_y);
-	evt.preventDefault();
-}
-
-function canvas_mousewheel(evt)
-{
-	if (!waterfall_setup_done) return;
-	//var i = Math.abs(evt.wheelDelta);
-	//var out = ((i / evt.wheelDelta) < 0);
-	//console.log(evt);
-	var relativeX = evt.pageX;
-	var out = ((evt.deltaY / Math.abs(evt.deltaY)) > 0);
-	//console.log(dir);
-	//i/=120;
-	var dir = out? ext_zoom.OUT : ext_zoom.IN;
-	/*while (i--)*/
-		zoom_step(dir, relativeX);
-	evt.preventDefault();	
-	//evt.returnValue = false; //disable scrollbar move
-}
+////////////////////////////////
+// zoom
+////////////////////////////////
 
 function zoom_finally()
 {
 	w3_innerHTML('id-nav-optbar-wf', 'WF'+ zoom_level.toFixed(0));
+	wf_gnd_value = wf_gnd_value_base - zoomCorrection();
    extint_environment_changed( { zoom:1 } );
 	freqset_select();
 }
@@ -2270,6 +2558,7 @@ var ZOOM_NOMINAL = 10, ZOOM_BAND = 6;
 var zoom_nom = 0, zoom_old_nom = 0;
 var zoom_levels_max = 0;
 var zoom_level = 0;
+var zoom_level_f = 0;
 var zoom_freq = 0;
 var zoom_maxin_s = ['id-maxin', 'id-maxin-nom', 'id-maxin-max'];
 
@@ -2280,12 +2569,26 @@ var x_bin = 0;				// left edge of waterfall in units of bin number
 
 function zoom_step(dir, arg2)
 {
+   if (audioFFT_active) {
+      audioFFT_update();
+      return;
+   }
+   
 	var out = (dir == ext_zoom.OUT);
 	var dir_in = (dir == ext_zoom.IN);
 	var not_band_and_not_abs = (dir != ext_zoom.TO_BAND && dir != ext_zoom.ABS);
 	var ozoom = zoom_level;
 	var x_obin = x_bin;
 	var x_norm;
+	var update_zoom_f = true;
+	
+	if (dir == ext_zoom.WHEEL) {
+	   if (arg2 == undefined) return;
+	   update_zoom_f = false;
+	   var znew = Math.round(zoom_level_f);
+	   if (znew == ozoom) return;
+	   dir = (znew > ozoom)? ext_zoom.IN : ext_zoom.OUT;
+	}
 
 	//console.log('zoom_step dir='+ dir +' arg2='+ arg2);
 	if (dir == ext_zoom.MAX_OUT) {		// max out
@@ -2385,6 +2688,7 @@ function zoom_step(dir, arg2)
 		}
 	}
 	
+	if (update_zoom_f) zoom_level_f = zoom_level;
 	//console.log("ZStep z"+zoom_level.toString()+" fLEFT="+canvas_get_dspfreq(0));
 	
 	var nom = (zoom_level == zoom_levels_max)? 2 : ((zoom_level >= zoom_nom)? 1:0);
@@ -2416,6 +2720,27 @@ function zoom_step(dir, arg2)
    zoom_finally();
 }
 
+function passband_increment(wider)
+{
+   var pb = ext_get_passband();
+   var pb_width = Math.abs(pb.high - pb.low);
+   var pb_inc;
+   if (wider)
+      pb_inc = ((pb_width * (1/0.80)) - pb_width) / 2;		// wider
+   else
+      pb_inc = (pb_width - (pb_width * 0.80)) / 2;				// narrower
+
+   var rnd = (pb_inc > 10)? 10 : 1;
+   pb_inc = Math.round(pb_inc/rnd) * rnd;
+   //console.log('PB w='+ pb_width +' inc='+ pb_inc +' lo='+ pb.low +' hi='+ pb.high);
+   pb.low += wider? -pb_inc : pb_inc;
+   pb.low = Math.round(pb.low/rnd) * rnd;
+   pb.high += wider? pb_inc : -pb_inc;
+   pb.high = Math.round(pb.high/rnd) * rnd;
+   //console.log('PB lo='+ pb.low +' hi='+ pb.high);
+   ext_set_passband(pb.low, pb.high, true);
+}
+
 function zoom_click(evt, dir, arg2)
 {
 	if (any_alternate_click_event(evt)) {
@@ -2425,24 +2750,7 @@ function zoom_click(evt, dir, arg2)
 		var zin = w3_contains(div, 'id-zoom-in');
 		var zout = w3_contains(div, 'id-zoom-out');
 		if (!zin && !zout) return;
-		
-		var pb = ext_get_passband();
-		var pb_width = Math.abs(pb.high - pb.low);
-		var pb_inc;
-		if (zin)
-			pb_inc = ((pb_width * (1/0.80)) - pb_width) / 2;		// wider
-		else
-			pb_inc = (pb_width - (pb_width * 0.80)) / 2;				// narrower
-
-		var rnd = (pb_inc > 10)? 10 : 1;
-		pb_inc = Math.round(pb_inc/rnd) * rnd;
-		//console.log('PB w='+ pb_width +' inc='+ pb_inc +' lo='+ pb.low +' hi='+ pb.high);
-		pb.low += zin? -pb_inc : pb_inc;
-		pb.low = Math.round(pb.low/rnd) * rnd;
-		pb.high += zin? pb_inc : -pb_inc;
-		pb.high = Math.round(pb.high/rnd) * rnd;
-		//console.log('PB lo='+ pb.low +' hi='+ pb.high);
-		ext_set_passband(pb.low, pb.high, true);
+		passband_increment(zin);
 		return;
 	}
 	
@@ -2476,9 +2784,20 @@ var page_scroll_amount = 0.8;
 
 function page_scroll(norm_dir)
 {
-	var dbins = norm_to_bins(norm_dir);
-	waterfall_pan_canvases(dbins);		// < 0 = pan left (toward lower freqs)
+   if (!audioFFT_active) {
+      var dbins = norm_to_bins(norm_dir);
+      waterfall_pan_canvases(dbins);		// < 0 = pan left (toward lower freqs)
+   }
    freqset_select();
+}
+
+function page_scroll_icon_click(evt, norm_dir)
+{
+   if (any_alternate_click_event(evt)) {
+      dx_label_step((norm_dir < 0)? -1:1);
+   } else {
+      page_scroll(norm_dir);
+   }
 }
 
 
@@ -2489,6 +2808,8 @@ var waterfall_scrollable_height;
 var canvas_container;
 var canvas_annotation;
 var canvas_phantom;
+
+var annotation_div;
 
 var wf_canvases = [];
 var old_canvases = [];
@@ -2544,14 +2865,17 @@ function init_canvas_container()
 	waterfall_width = canvas_container.clientWidth;
 	//console.log("init_canvas_container ww="+waterfall_width);
 	canvas_container.addEventListener("mouseout", canvas_container_mouseout, false);
-	//window.addEventListener("mouseout",window_mouseout,false);
-	//document.body.addEventListener("mouseup",body_mouseup,false);
 
 	// annotation canvas for FSK shift markers etc.
    canvas_annotation = create_canvas('id-annotation-canvas', wf_fft_size, wf_canvas_default_height, waterfall_width, wf_canvas_default_height);
    canvas_annotation.style.zIndex = 1;    // make on top of waterfall
 	canvas_container.appendChild(canvas_annotation);
 	add_canvas_listner(canvas_annotation);
+	
+	// annotation div for text containing links etc.
+	annotation_div = w3_el('id-annotation-div');
+	add_canvas_listner(annotation_div);
+	annotation_div.style.pointerEvents = 'none';    // prevent premature end of canvas dragging
 
 	// a phantom one at the end
 	// not an actual canvas but a <div> spacer
@@ -2677,16 +3001,130 @@ function resize_canvases(zoom)
 	canvas_phantom.style.left = zoom_value;
 
 	spectrum_canvas.style.width = new_width;
+
+   // above width change clears canvas, so redraw
+   if (rx_chan >= wf_chans) {
+      w3_innerHTML('id-annotation-div',
+         w3_div('w3-section w3-container',
+            w3_text('w3-large|color:cyan', 'Audio FFT<br>'),
+            w3_text('w3-small|color:cyan',
+                  'Zoom waterfall not available<br>' +
+                  'on channels '+ wf_chans_real +'-'+ (rx_chans-1) +' of Kiwis<br>' +
+                  'configured for '+ rx_chans +' channels.<br>'
+            ),
+            w3_text('w3-small|color:cyan',
+               'For details see the Kiwi forum.'
+               //'For details see: '+
+               //w3_link('w3-small', 'valentfx.com/vanilla/discussion/1309', 'forum post') + '.'
+            )
+         )
+      );
+   }
+
+/*
+   if (rx_chan >= wf_chans) {
+		var sw = canvas_annotation.width;
+		var sh = canvas_annotation.height;
+      var ctx = canvas_annotation.ctx;
+		ctx.clearRect(0,0,sw,sh);
+	   ctx.font = "18px sans-serif";
+	   ctx.textBaseline = "middle";
+	   ctx.textAlign = "left";
+	   if (audioFFT_active) {
+	      var x = sw/8;
+         var y = sh/2;
+         var text = 'AudioFFT';
+         w3_fillText(ctx, x, y, 'AudioFFT', 'cyan');
+         y += 18;
+         w3_fillText(ctx, x, y, '(zoom waterfall not available)', null, '14px sans-serif');
+	   } else {
+         var text =
+            wf_chans?
+               ('Waterfall not available for rx'+ rx_chan)
+            :
+               'Waterfall not allowed on this Kiwi';
+         w3_fillText(ctx, sw/2, sh/2, text, 'black');
+      }
+   }
+*/
 }
 
 
-// ========================================================
-// =======================  >WATERFALL  ===================
-// ========================================================
+////////////////////////////////
+// mobile
+////////////////////////////////
+
+function mobile_init()
+{
+	// When a mobile device connects to a Kiwi while held in portrait orientation:
+	// Remove top bar and minimize control panel if width < oldest iPad width (768px)
+	// which should catch all iPhones but no iPads (iPhone X width = 414px).
+	// Also scale control panel for small-screen tablets, e.g. 7" tablets with 600px portrait width.
+
+	var mobile = ext_mobile_info();
+   //console.log('$ wh='+ mobile.width +','+ mobile.height);
+	
+	// anything smaller than iPad: remove top bar and switch control panel to "off".
+	if (mobile.small) {
+	   toggle_or_set_hide_topbar(1);
+	   optbar_focus('optbar-off', 'init');
+	}
+	
+	// for narrow screen devices, i.e. phones and 7" tablets
+	if (mobile.narrow) {
+	   w3_hide('id-readme');   // don't show readme panel closed icon
+	   
+	   // remove top bar and band/label areas on phones
+	   if (mobile.width < 600) {
+	      toggle_or_set_hide_topbar(3);
+	   }
+	}
+	
+   owrx.last_mobile = {};     // force rescale first time
+   owrx.rescale_cnt = owrx.rescale_cnt2 = 0;
+
+	setInterval(function() {
+      mobile = ext_mobile_info(owrx.last_mobile);
+      owrx.last_mobile = mobile;
+
+      //extint_news('Cwh='+ mobile.width +','+ mobile.height +' '+ mobile.orient_unchanged +
+      //   '<br>r='+ owrx.rescale_cnt  +','+ owrx.rescale_cnt2 +' #'+ owrx.dseq);
+      //owrx.dseq++;
+
+      if (mobile.orient_unchanged) return;
+      owrx.rescale_cnt++;
+
+      var el = w3_el('id-control');
+
+	   if (mobile_laptop_test) {
+         extint_news('whu='+ mobile.width +','+ mobile.height +','+ el.uiWidth +
+            ' psn='+ mobile.isPortrait +','+ mobile.small +','+ mobile.narrow +' #'+ owrx.dseq);
+         owrx.dseq++;
+      }
+   
+      if (mobile.narrow) {
+         // scale control panel up or down to fit width of all narrow screens
+         var scale = mobile.width / el.uiWidth * 0.95;
+         el.style.transform = 'scale('+ scale.toFixed(2) +')';
+         el.style.transformOrigin = 'bottom right';
+         el.style.right = '0px';
+         owrx.rescale_cnt2++;
+      } else {
+         el.style.transform = 'none';
+         el.style.right = '10px';
+      }
+	}, 500);
+}
+
+
+////////////////////////////////
+// waterfall / spectrum
+////////////////////////////////
 
 var waterfall_setup_done=0;
 var waterfall_timer;
 var waterfall_ms;
+var audioFFT_active, audioFFT_prev_mode, audioFFT_clear_wf;
 
 function waterfall_init()
 {
@@ -2695,7 +3133,10 @@ function waterfall_init()
    }
    
 	init_canvas_container();
-	resize_waterfall_container(false); /* then */ resize_canvases();
+   //audioFFT_active = (dbgUs && rx_chan >= wf_chans);
+   audioFFT_active = (rx_chan >= wf_chans);
+	resize_waterfall_container(false);
+	resize_canvases();
 	panels_setup();
 	ident_init();
 	scale_setup();
@@ -2706,12 +3147,17 @@ function waterfall_init()
 	users_init(false);
 	stats_init();
 	check_top_bar_congestion();
-	if (spectrum_show) toggle_or_set_spec(toggle_e.SET, 1);
+	if (spectrum_show) setTimeout(spec_show, 2000);    // after control instantiation finishes
+	audioFFT_setup();
 
-	waterfall_ms = 900/wf_fps;
+	waterfall_ms = 900/wf_fps_max;
 	waterfall_timer = window.setInterval(waterfall_dequeue, waterfall_ms);
 	console.log('waterfall_dequeue @ '+ waterfall_ms +' msec');
+	
+	if (shortcut.keys != '') setTimeout(keyboard_shortcut_url_keys, 3000);
 
+   if (kiwi_isMobile() || mobile_laptop_test)
+      mobile_init();
 	waterfall_setup_done=1;
 }
 
@@ -2733,7 +3179,6 @@ var color_bands_dB = [
 var redraw_spectrum_dB_scale = false;
 var spectrum_colormap, spectrum_colormap_transparent;
 var spectrum_update = 0, spectrum_last_update = 0;
-var spectrum_filtered = 1;
 var spectrum_image;
 
 function spectrum_init()
@@ -2747,12 +3192,24 @@ function spectrum_init()
 	setInterval(function() { spectrum_update++ }, 1000 / spectrum_update_rate_Hz);
 
    spectrum_image = spectrum_ctx.createImageData(spectrum_canvas.width, spectrum_canvas.height)
-}
-
-function spectrum_filter(filter)
-{
-	spectrum_filtered = filter;
-	need_clear_specavg = true;
+   
+   if (!audioFFT_active && rx_chan >= wf_chans) {
+		// clear entire spectrum canvas to black
+		var sw = spectrum_canvas.width;
+		var sh = spectrum_canvas.height;
+		spectrum_ctx.fillStyle = "black";
+		spectrum_ctx.fillRect(0,0,sw,sh);
+		
+	   spectrum_ctx.font = "18px sans-serif";
+      spectrum_ctx.fillStyle = "white";
+      var text =
+         wf_chans?
+            ('Spectrum not available for rx'+ rx_chan)
+         :
+            'Spectrum not allowed on this Kiwi';
+      var tw = spectrum_ctx.measureText(text).width;
+      spectrum_ctx.fillText(text, sw/2-tw/2, sh/2);
+   }
 }
 
 // based on WF max/min range, compute color banding each 10 dB for spectrum display
@@ -2793,54 +3250,91 @@ function spectrum_dB_bands()
 
 var waterfall_dont_scale=0;
 var need_maxmindb_update = false;
+var need_clear_wf_sp_avg = false;
 
 var need_clear_specavg = false, clear_specavg = true;
-var specavg = [];
+var specavg = [], specpeak = [];
 
-function waterfall_add(data_raw)
+var need_clear_wfavg = false, clear_wfavg = true;
+var wfavg = [];
+
+// amounts empirically determined
+var wf_swallow_samples = [ 2, 4, 8, 18 ];    // for zoom: 11, 12, 13, 14
+var x_bin_server_last, wf_swallow = 0;
+
+function waterfall_add(data_raw, audioFFT)
 {
+   var x, y;
 	if (data_raw == null) return;
 	//var canvas = wf_canvases[0];
 	var canvas = wf_cur_canvas;
 	if (canvas == null) return;
 	
-	var u32View = new Uint32Array(data_raw, 4, 3);
-	var x_bin_server = u32View[0];		// bin & zoom from server at time data was queued
-	var u32 = u32View[1];
-	if (kiwi_gc_wf) u32View = null;	// gc
-	var x_zoom_server = u32 & 0xffff;
-	var flags = (u32 >> 16) & 0xffff;
-	var wf_flags = { COMPRESSED:1 };
-
-	var data_arr_u8 = new Uint8Array(data_raw, 16);	// unsigned dBm values, converted to signed later on
-	var bytes = data_arr_u8.length;
-	var w = wf_fft_size;
-
-	// when caught up, update the max/min db so lagging w/f data doesn't use wrong (newer) zoom correction
-	if (need_maxmindb_update && zoom_level == x_zoom_server) {
-		update_maxmindb_sliders();
-		need_maxmindb_update = false;
-	}
-
-	// when caught up, clear spectrum using new data
-	if (need_clear_specavg && x_bin == x_bin_server && zoom_level == x_zoom_server) {
-		clear_specavg = true;
-		need_clear_specavg = false;
-	}
+	var data_arr_u8, data, decomp_data;
+   var w = wf_fft_size;
 	
-	var data, decomp_data = null;
-	if (flags & wf_flags.COMPRESSED) {
-		decomp_data = new Uint8Array(bytes*2);
-		var wf_adpcm = { index:0, previousValue:0 };
-		decode_ima_adpcm_e8_u8(data_arr_u8, decomp_data, bytes, wf_adpcm);
-		var ADPCM_PAD = 10;
-		data = decomp_data.subarray(ADPCM_PAD);
-	} else {
-		data = data_arr_u8;
-	}
+	if (audioFFT == 0) {
+      var u32View = new Uint32Array(data_raw, 4, 3);
+      var x_bin_server = u32View[0];		// bin & zoom from server at time data was queued
+      var u32 = u32View[1];
+      if (kiwi_gc_wf) u32View = null;	// gc
+      var x_zoom_server = u32 & 0xffff;
+      var flags = (u32 >> 16) & 0xffff;
+      var wf_flags = { COMPRESSED:1 };
+   
+      data_arr_u8 = new Uint8Array(data_raw, 16);	// unsigned dBm values, converted to signed later on
+      var bytes = data_arr_u8.length;
+   
+      // when caught up, update the max/min db so lagging w/f data doesn't use wrong (newer) zoom correction
+      if (need_maxmindb_update && zoom_level == x_zoom_server) {
+         update_maxmindb_sliders();
+         need_maxmindb_update = false;
+      }
+   
+      // when caught up, clear spectrum using new data
+      if (x_bin == x_bin_server && zoom_level == x_zoom_server) {
+         if (need_clear_wf_sp_avg || need_clear_specavg) clear_specavg = true;
+         if (need_clear_wf_sp_avg || need_clear_wfavg)   clear_wfavg = true;
+         need_clear_wf_sp_avg = need_clear_wfavg = need_clear_specavg = false;
+      }
+      
+      if (flags & wf_flags.COMPRESSED) {
+         decomp_data = new Uint8Array(bytes*2);
+         var wf_adpcm = { index:0, previousValue:0 };
+         decode_ima_adpcm_e8_u8(data_arr_u8, decomp_data, bytes, wf_adpcm);
+         var ADPCM_PAD = 10;
+         data = decomp_data.subarray(ADPCM_PAD);
+      } else {
+         data = data_arr_u8;
+      }
+      
+      // When zoom level is too high there is a glich in WF DDC data.
+      // Swallow a few WF samples in that case (amount is zoom level dependent).
+      if (wf_swallow) {
+         wf_swallow--;
+         return;
+      }
+      if (x_bin_server != x_bin_server_last) {
+         x_bin_server_last = x_bin_server;
+         if (zoom_level >= 11) {
+            wf_swallow = wf_swallow_samples[zoom_level-11];
+            if (wf_fps != wf_fps_max) {
+               wf_swallow = Math.round(wf_swallow * wf_fps / wf_fps_max);
+               //console.log('wf_fps='+ wf_fps +' wf_swallow_samples='+ wf_swallow_samples[zoom_level-11] +' wf_swallow='+ wf_swallow);
+            }
+         }
+      }
+   } else {
+      data = data_raw;     // unsigned dB values, converted to signed later on
+      if (need_clear_specavg) {
+         clear_specavg = true;
+         need_clear_specavg = false;
+      }
+   }
 	
 	var sw, sh, tw=25;
 	var need_spectrum_update = false;
+	
 	if (spectrum_display && spectrum_update != spectrum_last_update) {
 		spectrum_last_update = spectrum_update;
 		need_spectrum_update = true;
@@ -2856,15 +3350,23 @@ function waterfall_add(data_raw)
 		spectrum_ctx.fillStyle = "lightGray";
 		for (var i=0; i < dB_bands.length; i++) {
 			var band = dB_bands[i];
-			var y = Math.round(band.norm * sh);
+			y = Math.round(band.norm * sh);
 			spectrum_ctx.fillRect(0,y,sw,1);
 		}
 
 		if (clear_specavg) {
-			for (var x=0; x<sw; x++) {
+			for (x=0; x<sw; x++) {
 				specavg[x] = spectrum_color_index(data[x]);
 			}
 			clear_specavg = false;
+			spectrum_peak_clear = true;
+		}
+		
+		if (spectrum_peak_clear) {
+			for (x=0; x<sw; x++) {
+				specpeak[x] = 0;
+			}
+			spectrum_peak_clear = false;
 		}
 		
 		// if necessary, draw scale on right side
@@ -2875,7 +3377,7 @@ function waterfall_add(data_raw)
 			spectrum_ctx.fillStyle = "black";
 			spectrum_ctx.fillRect(sw,0,tw,sh);
 			*/
-			for (var x = sw; x < spectrum_canvas.width; x++) {
+			for (x = sw; x < spectrum_canvas.width; x++) {
 				spectrum_ctx.putImageData(spectrum_colormap_transparent, x, 0, 0, 0, 1, sh);
 			}
 			
@@ -2883,7 +3385,7 @@ function waterfall_add(data_raw)
 			spectrum_ctx.fillStyle = "white";
 			for (var i=0; i < dB_bands.length; i++) {
 				var band = dB_bands[i];
-				var y = Math.round(band.norm * sh);
+				y = Math.round(band.norm * sh);
 				spectrum_ctx.fillText(band.dB, sw+3, y-4);
 				//console.log("SP x="+sw+" y="+y+' '+dB);
 			}
@@ -2894,40 +3396,52 @@ function waterfall_add(data_raw)
 	// Add line to waterfall image			
 	
 	var oneline_image = canvas.oneline_image;
-	var zwf, color;
+	var z, color;
 	
    // spectrum
 	if (spectrum_display && need_spectrum_update) {
-	   var v = Math.NaN;
-	   var el = w3_el('id-devl-input1');
-	   if (el && el.value != '') v = parseFloat(el.value);
-	   //console.log('v='+ v +' ['+ el.value +']');
-	   var Tconst = isNaN(v)? spec_nonlin_time_constant : v;
-	   el = w3_el('id-devl-input2');
-	   if (el) el.value = isNaN(v)? 'NaN (using default -0.2)' : v.toFixed(3);
+      spectrum_ctx.fillStyle = 'hsl(180, 100%, 70%)';
 
-	   el = w3_el('id-devl-input3');
-      spectrum_ctx.fillStyle = (el && el.value != '')? el.value : 'hsl(180, 100%, 70%)';
+		for (x=0; x<sw; x++) {
+         z = spectrum_color_index(wf_gnd? wf_gnd_value : data[x]);
 
-		for (var x=0; x<sw; x++) {
-         var ysp = spectrum_color_index(data[x]);
-
-         if (spectrum_filtered) {
+         switch (spec_filter) {
+         
+         case wf_sp_menu_e.IIR:
             // non-linear spectrum filter from Rocky (Alex, VE3NEA)
             // see http://www.dxatlas.com/rocky/advanced.asp
-            var iir_gain = 1 - Math.exp(Tconst * ysp/255)
-            var z = specavg[x];
-            z = z + iir_gain * (ysp - z);
+            
+            var iir_gain = 1 - Math.exp(-sp_param * z/255);
+            if (iir_gain <= 0.01) iir_gain = 0.01;    // enforce minimum decay rate
+            var z1 = specavg[x];
+            z1 = z1 + iir_gain * (z - z1);
+            if (z1 > 255) z1 = 255; if (z1 < 0) z1 = 0;
+            z = specavg[x] = z1;
+            break;
+            
+         case wf_sp_menu_e.MMA:
             if (z > 255) z = 255; if (z < 0) z = 0;
-            specavg[x] = z;
-         } else {
-            z = ysp;
+            specavg[x] = ((specavg[x] * (sp_param-1)) + z) / sp_param;
+            z = specavg[x];
+            break;
+            
+         case wf_sp_menu_e.EMA:
             if (z > 255) z = 255; if (z < 0) z = 0;
+            specavg[x] += (z - specavg[x]) / sp_param;
+            z = specavg[x];
+            break;
+            
+         case wf_sp_menu_e.OFF:
+         default:
+            if (z > 255) z = 255; if (z < 0) z = 0;
+            break;
          }
+
+         if (z > specpeak[x]) specpeak[x] = z; 
 
          // draw the spectrum based on the spectrum colormap which should
          // color the 10 dB bands appropriately
-         var y = Math.round((1 - z/255) * sh);
+         y = Math.round((1 - z/255) * sh);
 
          if (spectrum_slow_dev) {
             spectrum_ctx.fillRect(x,y, 1,sh-y);
@@ -2935,50 +3449,116 @@ function waterfall_add(data_raw)
             // fixme: could optimize amount of data moved like smeter
             spectrum_ctx.putImageData(spectrum_colormap, x,0, 0,y, 1,sh-y+1);
          }
-
-         /*
-         for (var i=0; i<4; i++) {
-            spectrum_image.data[(
-         }
-         */
 		}
-
-      //spectrum_ctx.putImageData(spectrum_colormap, x, 0, 0, y, 1, sh-y+1);
+		
+		if (spectrum_peak) {
+         spectrum_ctx.lineWidth = 1;
+	      //spectrum_ctx.fillStyle = 'yellow';
+         spectrum_ctx.strokeStyle = 'yellow';
+         spectrum_ctx.beginPath();
+         y = Math.round((1 - specpeak[0]/255) * sh) - 1;
+         spectrum_ctx.moveTo(0,y);
+         for (x=1; x<sw; x++) {
+            y = Math.round((1 - specpeak[x]/255) * sh) - 1;
+            spectrum_ctx.lineTo(x,y);
+         }
+         spectrum_ctx.globalAlpha = 0.55;
+         //spectrum_ctx.fill();
+         spectrum_ctx.stroke();
+         spectrum_ctx.globalAlpha = 1;
+      }
 	}
 
    // waterfall
-   for (var x=0; x<w; x++) {
-      // wf
-      zwf = waterfall_color_index(data[x]);
+   for (x=0; x<w; x++) {
+      z = waterfall_color_index(wf_gnd? wf_gnd_value : data[x]);
       
+      switch (wf_filter) {
+      
+      case wf_sp_menu_e.IIR:
+         // non-linear spectrum filter from Rocky (Alex, VE3NEA)
+         // see http://www.dxatlas.com/rocky/advanced.asp
+         
+         if (clear_wfavg) wfavg[x] = z;
+         var iir_gain = 1 - Math.exp(-wf_param * z/255);
+         if (iir_gain <= 0.01) iir_gain = 0.01;    // enforce minimum decay rate
+         var z1 = wfavg[x];
+         z1 = z1 + iir_gain * (z - z1);
+         if (z1 > 255) z1 = 255; if (z1 < 0) z1 = 0;
+         wfavg[x] = z1;
+         z = Math.round(wfavg[x]);
+         break;
+         
+      case wf_sp_menu_e.MMA:
+         if (clear_wfavg) wfavg[x] = z;
+         wfavg[x] = ((wfavg[x] * (wf_param-1)) + z) / wf_param;
+         z = Math.round(wfavg[x]);
+         break;
+         
+      case wf_sp_menu_e.EMA:
+         if (clear_wfavg) wfavg[x] = z;
+         wfavg[x] += (z - wfavg[x]) / wf_param;
+         //if (x == 400) console.log('old='+ old +' clr='+ clear_wfavg +' z='+ z +' new='+ wfavg[x]);
+         z = Math.round(wfavg[x]);
+         break;
+         
+      case wf_sp_menu_e.OFF:
+      default:
+         break;
+      }
+
       /*
-      color = color_map[zwf];
+      color = color_map[z];
 
       for (var i=0; i<4; i++) {
          oneline_image.data[x*4+i] = ((color>>>0) >> ((3-i)*8)) & 0xff;
       }
       */
-      oneline_image.data[x*4  ] = color_map_r[zwf];
-      oneline_image.data[x*4+1] = color_map_g[zwf];
-      oneline_image.data[x*4+2] = color_map_b[zwf];
+      oneline_image.data[x*4  ] = color_map_r[z];
+      oneline_image.data[x*4+1] = color_map_g[z];
+      oneline_image.data[x*4+2] = color_map_b[z];
       oneline_image.data[x*4+3] = 0xff;
    }
+   
+   if (clear_wfavg) clear_wfavg = false;
 	
+	// debug shear problems
+	/*
+   if (x_bin != x_bin_server) {
+      for (x=450; x<456; x++) {
+         oneline_image.data[x*4  ] = 255;
+         oneline_image.data[x*4+1] = 0;
+         oneline_image.data[x*4+2] = 0;
+      }
+   }
+   if (x_bin_server_last != x_bin_server) {
+      for (x=0; x<1024; x++) {
+         x_bin_server_last = x_bin_server;
+         oneline_image.data[x*4  ] = wf_swallow? 255:0;
+         oneline_image.data[x*4+1] = 255;
+         oneline_image.data[x*4+2] = 0;
+      }
+   }
+   */
+
 	canvas.ctx.putImageData(oneline_image, 0, wf_canvas_actual_line);
-	IBP_scan_plot(oneline_image);
+	
+	// NB: can't use isDefined() here
+	if (audioFFT == 0 && typeof(IBP_scan_plot) != 'undefined') IBP_scan_plot(oneline_image);
 	
 	if (need_wf_autoscale) {
 	   var pwr_dBm = [];
-	   var len = data.length;
+      var autoscale = audioFFT_active? data.slice(256, 768) : data;
+	   var len = autoscale.length;
 	   
 	   // convert from transmitted values to true dBm
 	   for (var i = 0; i < len; i++) {
-	      pwr_dBm[i] = dB_wire_to_dBm(data[i]);
+	      pwr_dBm[i] = dB_wire_to_dBm(autoscale[i]);
       }
 	   pwr_dBm.sort(function(a,b) {return a-b});
 	   var noise = pwr_dBm[Math.floor(0.5 * len)];
 	   var signal = pwr_dBm[Math.floor(0.98 * len)];
-	   console.log('wf autoscale: min='+ pwr_dBm[0] +' noise='+ noise +' signal='+ signal +' max='+ pwr_dBm[len-1]);
+	   //console.log('wf autoscale: min='+ pwr_dBm[0] +' noise='+ noise +' signal='+ signal +' max='+ pwr_dBm[len-1]);
       setmaxdb(1, signal + 30);
       setmindb(1, noise - 10);
       update_maxmindb_sliders();
@@ -2988,36 +3568,39 @@ function waterfall_add(data_raw)
 	// If data from server hasn't caught up to our panning or zooming then fix it.
 	// This code is tricky and full of corner-cases.
 	
-	var pixel_dx;
-	if (sb_trace) console.log('WF fixup bin='+x_bin+'/'+x_bin_server+' z='+zoom_level+'/'+x_zoom_server);
-
-	// need to fix zoom before fixing the pan
-	if (zoom_level != x_zoom_server) {
-		var dz = zoom_level - x_zoom_server;
-		var out = dz < 0;
-		var dbins = out? (x_bin_server - x_bin) : (x_bin - x_bin_server);
-		var pixel_dx = bins_to_pixels(2, dbins, out? zoom_level:x_zoom_server);
-		if (sb_trace)
-			console.log("WF Z fix z"+x_zoom_server+'>'+zoom_level+' out='+out+' b='+x_bin+'/'+x_bin_server+'/'+dbins+" px="+pixel_dx);
-		waterfall_zoom(canvas, dz, wf_canvas_actual_line, pixel_dx);
-		
-		// x_bin_server has changed now that we've zoomed
-		x_bin_server += out? -dbins : dbins;
-		if (sb_trace) console.log('WF z fixed');
-	}
-	
-	if (x_bin != x_bin_server) {
-		pixel_dx = bins_to_pixels(3, x_bin - x_bin_server, zoom_level);
-		if (sb_trace)
-			console.log("WF bin fix L="+wf_canvas_actual_line+" xb="+x_bin+" xbs="+x_bin_server+" pdx="+pixel_dx);
-		waterfall_pan(canvas, wf_canvas_actual_line, pixel_dx);
-		if (sb_trace) console.log('WF bin fixed');
-	}
-
-	if (sb_trace && x_bin == x_bin_server && zoom_level == x_zoom_server) {
-		console.log('--WF FIXUP ALL DONE--');
-		sb_trace=0;
-	}
+	if (audioFFT == 0) {
+      var pixel_dx;
+      if (sb_trace) console.log('WF fixup bin='+x_bin+'/'+x_bin_server+' z='+zoom_level+'/'+x_zoom_server);
+   
+      // need to fix zoom before fixing the pan
+      if (zoom_level != x_zoom_server) {
+         var dz = zoom_level - x_zoom_server;
+         var out = dz < 0;
+         var dbins = out? (x_bin_server - x_bin) : (x_bin - x_bin_server);
+         var pixel_dx = bins_to_pixels(2, dbins, out? zoom_level:x_zoom_server);
+         if (sb_trace)
+            console.log("WF Z fix z"+x_zoom_server+'>'+zoom_level+' out='+out+' b='+x_bin+'/'+x_bin_server+'/'+dbins+" px="+pixel_dx);
+         waterfall_zoom(canvas, dz, wf_canvas_actual_line, pixel_dx);
+         
+         // x_bin_server has changed now that we've zoomed
+         x_bin_server += out? -dbins : dbins;
+         if (sb_trace) console.log('WF z fixed');
+      }
+      
+      if (x_bin != x_bin_server) {
+         pixel_dx = bins_to_pixels(3, x_bin - x_bin_server, zoom_level);
+         if (sb_trace)
+            console.log("WF bin fix L="+wf_canvas_actual_line+" xb="+x_bin+" xbs="+x_bin_server+" pdx="+pixel_dx);
+         waterfall_pan(canvas, wf_canvas_actual_line, pixel_dx);
+         if (sb_trace) console.log('WF bin fixed');
+      }
+   
+      if (sb_trace && x_bin == x_bin_server && zoom_level == x_zoom_server) {
+         console.log('--WF FIXUP ALL DONE--');
+         sb_trace=0;
+      }
+   }
+   
 	wf_canvas_actual_line--;
 	wf_shift_canvases();
 	if (wf_canvas_actual_line < 0) add_canvas();
@@ -3080,6 +3663,7 @@ var last_pixels_frac = 0;
 function waterfall_pan_canvases(bins)
 {
 	if (!bins) return;
+   if (audioFFT_active) return;
 	
 	var x_obin = x_bin;
 	x_bin += bins;
@@ -3098,8 +3682,9 @@ function waterfall_pan_canvases(bins)
 	wf_send("SET zoom="+ zoom_level +" start="+ x_bin);
 	
 	mkscale();
-	need_clear_specavg = true;
+	need_clear_wf_sp_avg = true;
 	dx_schedule_update();
+   extint_environment_changed( { waterfall_pan:1 } );
 
 	// reset "select band" menu if freq is no longer inside band
 	//console.log('page_scroll PBV='+ passband_visible() +' freq_car_Hz='+ freq_car_Hz);
@@ -3184,7 +3769,7 @@ function waterfall_zoom_canvases(dz, x)
 		waterfall_zoom(cv, dz, -1, x);
 	});
 	
-	need_clear_specavg = true;
+	need_clear_wf_sp_avg = true;
 }
 
 // window:
@@ -3212,7 +3797,9 @@ function resize_waterfall_container(check_init)
 	var wf_height = waterfall_height();
 
 	if (wf_height >= 0) {
-		canvas_container.style.height = px(wf_height);
+	
+	   // canvas_annotation has to track canvas_container height so as not to generate undesired mouseout events
+		canvas_annotation.style.height = canvas_container.style.height = px(wf_height);
 		waterfall_scrollable_height = wf_height * 3;
 
       // Don't change the height because that clears the canvas.
@@ -3240,7 +3827,7 @@ function waterfall_add_queue(what)
 	var spacing = waterfall_last_add? (now - waterfall_last_add) : 0;
 	waterfall_last_add = now;
 
-	waterfall_queue.push({ data:what, seq:seq, spacing:spacing });
+	waterfall_queue.push({ data:what, audioFFT:0, seq:seq, spacing:spacing });
 	if (kiwi_gc_wf) what = null;	// gc
 }
 
@@ -3251,11 +3838,11 @@ var wf_dq_onesec = 0;
 function waterfall_dequeue()
 {
 	/*
-	wf_dq_onesec += waterfall_ms;
-	if (wf_dq_onesec >= 1000) {
-		console.log('WF Q'+ waterfall_queue.length);
-		wf_dq_onesec = 0;
-	}
+      wf_dq_onesec += waterfall_ms;
+      if (wf_dq_onesec >= 1000) {
+         console.log('WF Q='+ waterfall_queue.length);
+         wf_dq_onesec = 0;
+      }
 	*/
 	
 	// demodulator must have been initialized before calling zoom_step()
@@ -3274,13 +3861,14 @@ function waterfall_dequeue()
 		var seq = waterfall_queue[0].seq;
 		var target = audio_ext_sequence + waterfall_delay;
 		if (seq > target) {
-			//console.log('SEQ too soon: '+ seq +' > '+ target +' ('+ (seq - target) +')');
+			//console.log('SEQ too soon: s'+ seq +' > t'+ target +' ('+ (seq - target) +')');
 			return;		// too soon
 		}
 
 		var now = Date.now();
 		if (seq == audio_ext_sequence && now < (waterfall_last_out + waterfall_queue[0].spacing)) {
 			//console.log('SEQ need spacing');
+			//console.log('SEQ need spacing: s'+ seq +' sp'+ waterfall_queue[0].spacing +' ('+ (now - waterfall_last_out) +')');
 			return;		// need spacing
 		}
 	
@@ -3289,8 +3877,9 @@ function waterfall_dequeue()
 		
 		var data = waterfall_queue[0].data;
 		if (kiwi_gc_wf) waterfall_queue[0].data = null;	// gc
+		var audioFFT = waterfall_queue[0].audioFFT;
 		waterfall_queue.shift();
-		waterfall_add(data);
+		waterfall_add(data, audioFFT);
 		if (kiwi_gc_wf) data = null;	// gc
 	}
 }
@@ -3387,9 +3976,10 @@ function dB_wire_to_dBm(db_value)
 	// Done this way because -127 is the smallest value in an int8 which isn't enough
 	// to hold our smallest dBm value and also we don't expect dBm values > 0 to be needed.
 	//
-	// If we map it the reverse way, (u1_t) 0..255 => 0..-255 dBm (which is more natural), then we get
-	// noise in the bottom bins due to funny interaction of the reversed values with the
-	// ADPCM compression for reasons we don't understand.
+   // We map 0..-200 dBm to (u1_t) 255..55
+   // If we map it the reverse way, (u1_t) 0..255 => 0..-255 dBm (which is more natural), then the
+   // noise in the bottom bits due to the ADPCM compression will effect the high-order dBm bits
+   // which is bad.
 	
 	if (db_value < 0) db_value = 0;
 	if (db_value > 255) db_value = 255;
@@ -3470,6 +4060,22 @@ function waterfall_color_index_max_min(db_value, maxdb, mindb)
 	return i;
 }
 
+function color_index_max_min(value, maxdb, mindb)
+{
+	if (value < mindb) value = mindb;
+	if (value > maxdb) value = maxdb;
+	var relative_value = value - mindb;
+	var fullscale = maxdb - mindb;
+	fullscale = fullscale? full_scale : 1;	// can't be zero
+	var value_percent = relative_value / fullscale;
+	
+	var i = value_percent*255;
+	i = Math.round(i);
+	if (i<0) i=0;
+	if (i>255) i=255;
+	return i;
+}
+
 /* not used
 //var color_scale=[0xFFFFFFFF, 0x000000FF];
 //var color_scale=[0x000000FF, 0x000000FF, 0x3a0090ff, 0x10c400ff, 0xffef00ff, 0xff5656ff];
@@ -3506,9 +4112,215 @@ function color_between(first, second, percent)
 */
 	
 
-// ========================================================
-// =======================  >UI  ==========================
-// ========================================================
+////////////////////////////////
+// audio FFT
+////////////////////////////////
+
+var fft = {
+   init: false,
+   comp_1x: false,
+   audioFFT_dynload: {},
+
+   offt: 0,
+   i_re: 0,
+   i_im: 0,
+   o_re: 0,
+   o_im: 0,
+   window_512: [],
+   window_1k: [],
+   window_2k: [],
+   pwr_dB: [],
+   dBi: [],
+
+   CUTESDR_MAX_VAL: 32767,
+};
+
+function audioFFT_setup()
+{
+   if (!audioFFT_active) return;
+   zoom_level = 0;
+   var last_AF_max_dB = readCookie('last_AF_max_dB');
+   if (last_AF_max_dB == null) last_AF_max_dB = maxdb;
+   var last_AF_min_dB = readCookie('last_AF_min_dB');
+   if (last_AF_min_dB == null) last_AF_min_dB = mindb_un;
+   setmaxdb(1, last_AF_max_dB);
+   setmindb(1, last_AF_min_dB);
+   update_maxmindb_sliders();
+
+   // Hanning
+   var window = function(i, nsamp) {
+      return (0.5 - 0.5 * Math.cos((2 * Math.PI * i)/(nsamp-1)));
+   };
+
+   for (i = 0; i < 512; i++) fft.window_512[i] = window(i, 512);
+   for (i = 0; i < 1024; i++) fft.window_1k[i] = window(i, 1024);
+   for (i = 0; i < 2048; i++) fft.window_2k[i] = window(i, 2048);
+}
+
+function audioFFT_update()
+{
+   mkscale();
+   dx_schedule_update();
+   freq_link_update();
+   w3_innerHTML('id-nav-optbar-wf', 'WF');
+   freqset_select();
+
+   // clear waterfall
+   if (audioFFT_clear_wf) {
+      wf_canvases.forEach(function(cv) {
+         cv.ctx.fillStyle = "Black";
+         cv.ctx.fillRect(0,0, cv.width,cv.height);
+      });
+      need_clear_specavg = true;
+      audioFFT_clear_wf = false;
+   }
+}
+
+function wf_audio_FFT(audio_data, samps)
+{
+   if (!audioFFT_active) return;
+   
+   if (!kiwi_load_js_polled(fft.audioFFT_dynload, ['pkgs/js/Ooura_FFT32.js'])) return;
+   
+   var i, j, k;
+   
+   //console.log('iq='+ audio_mode_iq +' comp='+ audio_compression +' samps='+ samps);
+
+   var iq = (ext_get_mode() == 'iq');
+   if (!fft.init || iq != fft.iq || audio_compression != fft.comp) {
+      console.log('audio_FFT: SWITCHING iq='+ iq +' comp='+ audio_compression);
+      var type;
+      if (iq) {
+         type = 'complex';
+         fft.size = 1024;
+         fft.offt = ooura32.FFT(fft.size, {"type":"complex", "radix":4});
+         fft.i_re = ooura32.vectorArrayFactory(fft.offt);
+         fft.i_im = ooura32.vectorArrayFactory(fft.offt);
+      } else {
+         type = 'real';
+         fft.size = audio_compression? (fft.comp_1x? 2048 : 1024) : 512;
+         fft.offt = ooura32.FFT(fft.size, {"type":"real", "radix":4});
+         fft.i_re = ooura32.scalarArrayFactory(fft.offt);
+      }
+      fft.o_re = ooura32.vectorArrayFactory(fft.offt);
+      fft.o_im = ooura32.vectorArrayFactory(fft.offt);
+      //fft.scale = 10.0 * 2.0 / (fft.size * fft.size * fft.CUTESDR_MAX_VAL * fft.CUTESDR_MAX_VAL);
+      // FIXME: What's the correct value to use here? Adding the third fft.size was just arbitrary.
+      fft.scale = 10.0 * 2.0 / (fft.size * fft.size * fft.size * fft.CUTESDR_MAX_VAL * fft.CUTESDR_MAX_VAL);
+      
+      for (i = 0; i < 1024; i++) fft.pwr_dB[i] = 0;
+      fft.iq = iq;
+      fft.comp = audio_compression;
+      fft.init = true;
+   }
+
+   if (fft.iq) {
+      for (i = 0, j = 0; i < 1024; i += 2, j++) {
+         fft.i_re[j] = audio_data[i] * fft.window_512[j];
+         fft.i_im[j] = audio_data[i+1] * fft.window_512[j];
+      }
+      fft.offt.fft(fft.offt, fft.i_re.buffer, fft.i_im.buffer, fft.o_re.buffer, fft.o_im.buffer);
+      for (j = 0, k = 512; j < 256; j++, k++) {
+         var re = fft.o_re[j], im = fft.o_im[j];
+         var pwr = re*re + im*im;
+         var dB = 10.0 * Math.log10(pwr * fft.scale + 1e-30);
+         dB = Math.round(255 + dB);
+         fft.pwr_dB[k] = dB;
+      }
+      for (j = 256, k = 256; j < 512; j++, k++) {
+         var re = fft.o_re[j], im = fft.o_im[j];
+         var pwr = re*re + im*im;
+         var dB = 10.0 * Math.log10(pwr * fft.scale + 1e-30);
+         dB = Math.round(255 + dB);
+         fft.pwr_dB[k] = dB;
+      }
+      waterfall_queue.push({ data:fft.pwr_dB, audioFFT:1, seq:0, spacing:0 });
+   } else {
+      if (audio_compression) {
+         if (fft.comp_1x) {
+            // 2048 real samples done as 1x 2048-pt FFT
+            for (i = 0; i < 2048; i++) {
+               fft.i_re[i] = audio_data[i] * fft.window_2k[i];
+            }
+            fft.offt.fft(fft.offt, fft.i_re.buffer, fft.o_re.buffer, fft.o_im.buffer);
+            for (j = 0, k = 256; j < 1024; j++) {
+               var re = fft.o_re[j], im = fft.o_im[j];
+               var pwr = re*re + im*im;
+               fft.dBi[j&1] = Math.round(255 + (10.0 * Math.log10(pwr * fft.scale + 1e-30)));
+               if (j & 1) {
+                  fft.pwr_dB[k] = Math.max(fft.dBi[0], fft.dBi[1]);
+                  k++;
+               }
+            }
+         } else {
+            // 2048 real samples done as 2x 1024-pt FFTs
+            for (i = 0; i < 1024; i++) {
+               fft.i_re[i] = audio_data[i] * fft.window_1k[i];
+            }
+            fft.offt.fft(fft.offt, fft.i_re.buffer, fft.o_re.buffer, fft.o_im.buffer);
+            for (j = 0, k = 256; j < 512; j++, k++) {
+               var re = fft.o_re[j], im = fft.o_im[j];
+               var pwr = re*re + im*im;
+               fft.pwr_dB[k] = Math.round(255 + (10.0 * Math.log10(pwr * fft.scale + 1e-30)));
+            }
+            waterfall_queue.push({ data:fft.pwr_dB, audioFFT:1, seq:0, spacing:0 });
+      
+            for (i = 1024; i < 2048; i++) {
+               fft.i_re[i] = audio_data[i] * fft.window_2k[i-1024];
+            }
+            fft.offt.fft(fft.offt, fft.i_re.buffer, fft.o_re.buffer, fft.o_im.buffer);
+            for (j = 0, k = 256; j < 512; j++, k++) {
+               var re = fft.o_re[j], im = fft.o_im[j];
+               var pwr = re*re + im*im;
+               fft.pwr_dB[k] = Math.round(255 + (10.0 * Math.log10(pwr * fft.scale + 1e-30)));
+            }
+         }
+         waterfall_queue.push({ data:fft.pwr_dB, audioFFT:1, seq:0, spacing:0 });
+      } else {
+         for (i = 0; i < 512; i++) {
+            fft.i_re[i] = audio_data[i] * fft.window_512[i];
+         }
+         fft.offt.fft(fft.offt, fft.i_re.buffer, fft.o_re.buffer, fft.o_im.buffer);
+         for (j = 0, k = 256; j < 256; j++, k += 2) {
+            var re = fft.o_re[j], im = fft.o_im[j];
+            var pwr = re*re + im*im;
+            fft.pwr_dB[k] = fft.pwr_dB[k+1] = Math.round(255 + (10.0 * Math.log10(pwr * fft.scale + 1e-30)));
+         }
+         waterfall_queue.push({ data:fft.pwr_dB, audioFFT:1, seq:0, spacing:0 });
+      }
+   }
+}
+
+/*
+         // 2048 real samples done as 2x 1024-pt FFTs
+         
+         for (i = 0; i < 1024; i++) {
+            fft.i_re[i] = audio_data[i] * fft.window_1k[i];
+         }
+         fft.offt.fft(fft.offt, fft.i_re.buffer, fft.o_re.buffer, fft.o_im.buffer);
+         for (j = 0, k = 256; j < 512; j++, k++) {
+            var re = fft.o_re[j], im = fft.o_im[j];
+            var pwr = re*re + im*im;
+            fft.pwr_dB[k] = Math.round(255 + (10.0 * Math.log10(pwr * fft.scale + 1e-30)));
+         }
+         waterfall_queue.push({ data:fft.pwr_dB, audioFFT:1, seq:0, spacing:0 });
+   
+         for (i = 1024; i < 2048; i++) {
+            fft.i_re[i] = audio_data[i] * fft.window_1k[i-1024];
+         }
+         fft.offt.fft(fft.offt, fft.i_re.buffer, fft.o_re.buffer, fft.o_im.buffer);
+         for (j = 0, k = 256; j < 512; j++, k++) {
+            var re = fft.o_re[j], im = fft.o_im[j];
+            var pwr = re*re + im*im;
+            fft.pwr_dB[k] = Math.round(255 + (10.0 * Math.log10(pwr * fft.scale + 1e-30)));
+         }
+         waterfall_queue.push({ data:fft.pwr_dB, audioFFT:1, seq:0, spacing:0 });
+*/
+
+
+////////////////////////////////
+// ui
+////////////////////////////////
 
 /*
 	displayed vs carrier frequency rules:
@@ -3543,7 +4355,7 @@ var freqset_tout;
 function freq_dsp_to_car(fdsp)
 {
 	var demod = demodulators[0];
-	if (typeof demod == "undefined") {
+	if (isUndefined(demod)) {
 	   console.log("freq_dsp_to_car no demod?");
 		return fdsp;
 	}
@@ -3559,7 +4371,7 @@ function freq_dsp_to_car(fdsp)
 function freq_car_to_dsp(fcar)
 {
 	var demod = demodulators[0];
-	if (typeof demod == "undefined") return fcar;
+	if (isUndefined(demod)) return fcar;
 	var offset = demod.low_cut + (demod.high_cut - demod.low_cut)/2;
 	fdsp = demod.isCW? fcar + offset : fcar;
 	//console.log("freq_car_to_dsp dsp="+fdsp+" car="+fcar+" isCW="+demod.isCW+" offset="+offset+" hcut="+demod.high_cut+" lcut="+demod.low_cut);
@@ -3571,7 +4383,7 @@ function passband_offset()
 	var offset=0;
 	var usePBCenter = false;
 	var demod = demodulators[0];
-	if (typeof demod != "undefined") {
+	if (isDefined(demod)) {
 		usePBCenter = demod.usePBCenter;
 		offset = usePBCenter? demod.low_cut + (demod.high_cut - demod.low_cut)/2 : 0;
 	}
@@ -3585,7 +4397,7 @@ function freq_passband_center()
 {
 	var freq = 0;
 	var demod = demodulators[0];
-	if (typeof demod != "undefined") {
+	if (isDefined(demod)) {
 		freq = center_freq + demod.offset_frequency;
 		freq += demod.low_cut + (demod.high_cut - demod.low_cut)/2;
 	}
@@ -3595,7 +4407,8 @@ function freq_passband_center()
 function passband_offset_dxlabel(mode)
 {
 	var pb = passbands[mode];
-	var usePBCenter = (mode == 'usb' || mode == 'lsb');
+	var m = mode.substr(0,2);
+	var usePBCenter = (m == 'us' || m == 'ls');
 	var offset = usePBCenter? pb.lo + (pb.hi - pb.lo)/2 : 0;
 	//console.log("passband_offset: m="+mode+" use="+usePBCenter+' o='+offset);
 	return offset;
@@ -3606,14 +4419,18 @@ function passband_offset_dxlabel(mode)
 // frequency entry
 ////////////////////////////////
 
-function freqmode_set_dsp_kHz(fdsp, mode)
+function freqmode_set_dsp_kHz(fdsp, mode, opt)
 {
+   var dont_clear_wf = w3_opt(opt, 'dont_clear_wf', false);
+   var open_ext = w3_opt(opt, 'open_ext', false);
+
 	fdsp *= 1000;
 	//console.log("freqmode_set_dsp_kHz: fdsp="+fdsp+' mode='+mode);
+	if (dont_clear_wf = false) audioFFT_clear_wf = true;
 
-	if (mode != undefined && mode != null && mode != cur_mode) {
+	if (isArg(mode) && (mode != cur_mode || open_ext == true)) {
 		//console.log("freqmode_set_dsp_kHz: calling demodulator_analog_replace");
-		demodulator_analog_replace(mode, fdsp);
+		ext_set_mode(mode, fdsp, opt);
 	} else {
 		freq_car_Hz = freq_dsp_to_car(fdsp);
 		//console.log("freqmode_set_dsp_kHz: calling demodulator_set_offset_frequency NEW freq_car_Hz="+freq_car_Hz);
@@ -3623,10 +4440,6 @@ function freqmode_set_dsp_kHz(fdsp, mode)
 
 function freqset_car_Hz(fcar)
 {
-   if (0 && dbgUs) {
-	   console.log("freqset_car_Hz: fcar="+fcar);
-      kiwi_trace();
-   }
 	freq_car_Hz = fcar;
 	//console.log("freqset_car_Hz: NEW freq_car_Hz="+fcar);
 }
@@ -3644,13 +4457,13 @@ function freqset_update_ui()
 	if (!waterfall_setup_done) return;
 	
 	var obj = w3_el('id-freq-input');
-	if (typeof obj == "undefined" || obj == null) return;		// can happen if SND comes up long before W/F
+	if (isUndefined(obj) || obj == null) return;		// can happen if SND comes up long before W/F
 
 	//obj.value = freq_displayed_kHz_str;
 	var f = freq_displayed_Hz + cfg.freq_offset*1e3;
 	obj.value = (f/1000).toFixed((f > 100e6)? 1:2);
 
-	//console.log("FUPD obj="+(typeof obj)+" val="+obj.value);
+	//console.log("FUPD obj="+ typeof(obj) +" val="+ obj.value);
 	freqset_select();
 	
 	// re-center if the new passband is outside the current waterfall 
@@ -3671,7 +4484,6 @@ function freqset_update_ui()
 
 	freq_step_update_ui();
 	freq_link_update();
-   extint_environment_changed( { freq:1 } );
 	
 	// update history list
    //console.log('freq_memory update');
@@ -3711,8 +4523,8 @@ function freq_memory_up_down(up)
       if (freq_memory_pointer < freq_memory.length-1) ++freq_memory_pointer; else return;
       if (freq_memory[freq_memory_pointer]) obj.value = freq_memory[freq_memory_pointer];
    }
-   console.log(freq_memory);
-   console.log('### freq_memory_up_down '+ (up? 'UP':'DOWN') +' len='+ freq_memory.length +' ptr='+ freq_memory_pointer +' f='+ freq_memory[freq_memory_pointer]);
+   //console.log(freq_memory);
+   //console.log('### freq_memory_up_down '+ (up? 'UP':'DOWN') +' len='+ freq_memory.length +' ptr='+ freq_memory_pointer +' f='+ freq_memory[freq_memory_pointer]);
 
    freq_up_down_timeout = setTimeout(function() {
       if (!kiwi_isMobile()) {
@@ -3727,22 +4539,32 @@ function freq_memory_up_down(up)
 
 function freqset_select(id)
 {
-	w3_field_select('id-freq-input', {mobile:1});
+   // only switch focus to id-freq-input if active element doesn't specify w3-retain-input-focus
+   var ae = document.activeElement;
+   //console.log(ae);
+   if (!ae || !w3_contains(ae, 'w3-retain-input-focus')) {
+	   w3_field_select('id-freq-input', {mobile:1});
+	} else {
+      //console.log('#### activeElement w3-retain-input-focus');
+	}
 }
-
-var last_mode_obj = null;
 
 function modeset_update_ui(mode)
 {
-	if (last_mode_obj != null) last_mode_obj.style.color = "white";
+	if (owrx.last_mode_el != null) owrx.last_mode_el.style.color = "white";
 	
 	// if sound comes up before waterfall then the button won't be there
-	var obj = w3_el('button-'+mode);
-	if (obj && obj.style) obj.style.color = "lime";
-	last_mode_obj = obj;
-	squelch_setup();
+	var el = w3_el('id-mode-'+ mode.substr(0,2));
+	el.innerHTML = mode.toUpperCase();
+	if (el && el.style) el.style.color = "lime";
+	owrx.last_mode_el = el;
+
+	squelch_setup(0);
 	writeCookie('last_mode', mode);
 	freq_link_update();
+
+	// disable compression button in iq mode
+	w3_set_props('id-button-compression', 'w3-disabled', (mode == 'iq'));
 }
 
 // delay the UI updates called from the audio path until the waterfall UI setup is done
@@ -3750,7 +4572,18 @@ function try_freqset_update_ui()
 {
 	if (waterfall_setup_done) {
 		freqset_update_ui();
-		mkenvelopes(get_visible_freq_range());
+		if (audioFFT_active) {
+		
+         // if not already clearing then clear on iq mode change
+         var c_iq_drm = (cur_mode == 'iq' || cur_mode == 'drm')? 1:0;
+         var p_iq_drm = (audioFFT_prev_mode == 'iq' || audioFFT_prev_mode == 'drm')? 1:0;
+		   if (!audioFFT_clear_wf && (c_iq_drm ^ p_iq_drm))
+		      audioFFT_clear_wf = true;
+		   audioFFT_update();
+		   audioFFT_prev_mode = cur_mode;
+		} else {
+		   mkenvelopes(get_visible_freq_range());
+		}
 	} else {
 		setTimeout(try_freqset_update_ui, 1000);
 	}
@@ -3771,28 +4604,80 @@ function freq_link_update()
 {
 	var host = kiwi_url_origin();
 	var url = host + '/?f='+ freq_displayed_kHz_str + cur_mode +'z'+ zoom_level;
-	var el = w3_el('id-freq-link');
-	el.innerHTML =
-	   '<a href="'+ url +'" target="_blank" title="'+ url +'">' +
-		   w3_icon('w3-text-css-lime', 'fa-external-link-square', 15) +
-		'</a>';
+	w3_innerHTML('id-freq-link',
+      w3_icon('w3-text-css-lime||title='+ dq('copy to clipboard:\n'+ url),
+         'fa-external-link-square', 15, '', 'freq_link_update_cb', url
+      )
+	);
+}
+
+function freq_link_update_cb(path, param, first)
+{
+   if (first) return;
+   w3_copy_to_clipboard(param);
 }
 
 function freqset_complete(from)
 {
+	var obj = w3_el('id-freq-input');
+	//console.log("FCMPL from="+ from +" obj="+ typeof(obj) +" val="+ (obj.value).toString());
 	kiwi_clearTimeout(freqset_tout);
    kiwi_clearTimeout(freq_up_down_timeout);
-	var obj = w3_el('id-freq-input');
-	console.log("FCMPL from="+ from +" obj="+(typeof obj)+" val="+(obj.value).toString());
-	if (typeof obj == "undefined" || obj == null) return;		// can happen if SND comes up long before W/F
-	var f = parseFloat(obj.value.replace(',', '.'));		// Thanks Petri, OH1BDF
-	//console.log("FCMPL2 obj="+(typeof obj)+" val="+(obj.value).toString());
+	if (isUndefined(obj) || obj == null) return;		// can happen if SND comes up long before W/F
+
+   var p = obj.value.split(/[\/:]/);
+	var slash = obj.value.includes('/');
+   // 'k' suffix is simply ignored since default frequencies are in kHz
+	var f = p[0].replace(',', '.').parseFloatWithUnits('M', 1e-3);    // Thanks Petri, OH1BDF
+	var err = true;
 	if (f > 0 && !isNaN(f)) {
 	   f -= cfg.freq_offset;
 	   if (f > 0 && !isNaN(f)) {
          freqmode_set_dsp_kHz(f, null);
 	      w3_field_select(obj, {mobile:1});
+	      err = false;
       }
+	}
+   if (err) freqset_update_ui();    // restore previous
+	
+	// accept "freq/pbw" or "/pbw" to quickly change passband width to a numeric value
+	// also "lo,hi" in place of "pbw"
+	// and ":pbc" or ":pbc,pbw" to set the pbc at the current pbw
+	if (p[1]) {
+	   p2 = p[1].split(',');
+	   var lo = p2[0].parseFloatWithUnits('k');
+	   var hi = NaN;
+	   if (p2.length > 1) {
+	      hi = p2[1].parseFloatWithUnits('k');
+	   }
+	   //console.log('### <'+ (slash? '/' : ':') +'> '+ p2[0] +'/'+ lo +', '+ p2[1] +'/'+ hi);
+      var cpb = ext_get_passband();
+      var cpbhw = (cpb.high - cpb.low)/2;
+      var cpbcf = cpb.low + cpbhw;
+	   
+	   if (slash) {
+         // adjust passband width about current pb center
+         if (p2.length == 1) {
+            // /pbw
+            var pbhw = lo/2;
+            lo = cpbcf - pbhw, hi = cpbcf + pbhw;
+         }
+      } else {
+         // adjust passband center using current or specified pb width
+         var pbc = lo;
+         if (p2.length == 1) {
+            // :pbc
+            lo = pbc - cpbhw;
+            hi = pbc + cpbhw;
+         } else {
+            var pbhw = Math.abs(hi/2);
+            // :pbc,pbw
+            lo = pbc - pbhw;
+            hi = pbc + pbhw;
+         }
+      }
+
+      ext_set_passband(lo, hi);     // does error checking for NaN, lo < hi, min pbw etc.
 	}
 }
 
@@ -3804,25 +4689,27 @@ var ignore_next_keyup_event = false;
 
 function freqset_keyup(obj, evt)
 {
+	//console.log("FKU obj="+ typeof(obj) +" val="+ obj.value +' ignore_next_keyup_event='+ ignore_next_keyup_event);
+	//console.log(obj); console.log(evt);
 	kiwi_clearTimeout(freqset_tout);
-	//console.log("FKU obj="+(typeof obj)+" val="+obj.value); console.log(obj); console.log(evt);
 	
 	// Ignore modifier-key key-up events triggered because the frequency box is selected while
 	// modifier-key-including mouse event occurs somewhere else.
+	// Also keeps ident_complete timeout from being set after return key.
 	
 	// But this is tricky. Key-up of a shift/ctrl/alt/cmd key can only be detected by looking for a
 	// evt.key string length != 1, i.e. evt.shiftKey et al don't seem to be valid for the key-up event!
 	// But also have to check for them with any_alternate_click_event() in case a modifier key of a
 	// normal key is pressed (e.g. shift-$).
-	//if (ignore_next_keyup_event) {
 	if (evt != undefined && evt.key != undefined) {
 		var klen = evt.key.length;
-		if (any_alternate_click_event(evt) || klen != 1) {
+		if (any_alternate_click_event(evt) || (klen != 1 && evt.key != 'Backspace')) {
 	
 			// An escape while the the freq box has focus causes the browser to put input value back to the
 			// last entered value directly by keyboard. This value is likely different than what was set by
 			// the last "element.value = ..." assigned from a waterfall click. So we have to restore the value.
 			if (evt.key == 'Escape') {
+			   //event_dump(evt, 'Escape-freq');
 				//console.log('** restore freq box');
 				freqset_update_ui();
 			}
@@ -3833,30 +4720,45 @@ function freqset_keyup(obj, evt)
 		}
 	}
 	
+	if (ignore_next_keyup_event) {
+      ignore_next_keyup_event = false;
+      return;
+   }
+   
 	freqset_tout = setTimeout(function() {freqset_complete(1);}, 3000);
 }
 
 var num_step_buttons = 6;
 
 var up_down = {
+   // 0 means use special step logic
 	am: [ 0, -1, -0.1, 0.1, 1, 0 ],
 	amn: [ 0, -1, -0.1, 0.1, 1, 0 ],
+	drm: [ 0, -1, -0.1, 0.1, 1, 0 ],
 	usb: [ 0, -1, -0.1, 0.1, 1, 0 ],
+	usn: [ 0, -1, -0.1, 0.1, 1, 0 ],
 	lsb: [ 0, -1, -0.1, 0.1, 1, 0 ],
+	lsn: [ 0, -1, -0.1, 0.1, 1, 0 ],
 	cw: [ 0, -0.1, -0.01, 0.01, 0.1, 0 ],
 	cwn: [ 0, -0.1, -0.01, 0.01, 0.1, 0 ],
-	nbfm: [ -5, -1, -0.1, 0.1, 1, 5 ],		// FIXME
-	iq: [ -5, -1, -0.1, 0.1, 1, 5 ],
-	s4285: [ -5, -1, -0.1, 0.1, 1, 5 ]
+	nbfm: [ -5, -1, -0.1, 0.1, 1, 5 ],
+	iq: [ 0, -1, -0.1, 0.1, 1, 0 ],
 };
 
 var up_down_default = {
+   // only referenced by special step logic, so only max/min values used (that's why others are zero)
+   // NB: abs(values)
 	am: [ 5, 0, 0, 0, 0, 5 ],
 	amn: [ 5, 0, 0, 0, 0, 5 ],
+	drm: [ 5, 0, 0, 0, 0, 5 ],
 	usb: [ 5, 0, 0, 0, 0, 5 ],
+	usn: [ 5, 0, 0, 0, 0, 5 ],
 	lsb: [ 5, 0, 0, 0, 0, 5 ],
+	lsn: [ 5, 0, 0, 0, 0, 5 ],
 	cw: [ 1, 0, 0, 0, 0, 1 ],
 	cwn: [ 1, 0, 0, 0, 0, 1 ],
+	// nbfm doesn't have special step
+	iq: [ 5, 0, 0, 0, 0, 5 ],
 };
 
 var NDB_400_1000_mode = 1;		// special 400/1000 step mode for NDB band
@@ -3875,7 +4777,10 @@ function special_step(b, sel, caller)
 		s += ' NDB';
 	} else
 	if (b != null && (b.name == 'LW' || b.name == 'MW')) {
-		if (cur_mode == 'am' || cur_mode == 'amn' || cur_mode == 'lsb' || cur_mode == 'usb') {
+	   var cm = cur_mode.substr(0,2);
+		var am_ssb_iq_drm = (cm == 'am' || cm == 'ls' || cm == 'us' || cm == 'iq' || cm == 'dr');
+		//console_log('special step', cm, am_ssb_iq_drm);
+		if (am_ssb_iq_drm) {
 			step_Hz = step_9_10? 9000 : 10000;
 		} else {
 			step_Hz = -1;
@@ -3932,14 +4837,16 @@ function freqstep(sel)
 		took = 'INC';
 	}
 	//console.log('STEP '+sel+' '+cur_mode+' fold='+freq_displayed_Hz+' inc='+incHz+' trunc='+trunc+' fnew='+fnew+' '+took);
-	freqmode_set_dsp_kHz(fnew/1000, null);
+	
+	// audioFFT mode: don't clear waterfall for small frequency steps
+	freqmode_set_dsp_kHz(fnew/1000, null, { dont_clear_wf:true });
 }
 
 var freq_step_last_mode, freq_step_last_band;
 
 function freq_step_update_ui(force)
 {
-	if (typeof cur_mode == "undefined" || passbands[cur_mode] == undefined ) return;
+	if (isUndefined(cur_mode) || passbands[cur_mode] == undefined ) return;
 	var b = find_band(freq_displayed_Hz);
 	
 	//console.log("freq_step_update_ui: lm="+freq_step_last_mode+' cm='+cur_mode);
@@ -3948,8 +4855,9 @@ function freq_step_update_ui(force)
 		return;
 	}
 
-	var show_9_10 = (b != null && (b.name == 'LW' || b.name == 'MW') &&
-		(cur_mode == 'am' || cur_mode == 'amn' || cur_mode == 'lsb' || cur_mode == 'usb'))? true:false;
+   var cm = cur_mode.substr(0,2);
+   var am_ssb_iq_drm = (cm == 'am' || cm == 'ls' || cm == 'us' || cm == 'iq' || cm == 'dr');
+	var show_9_10 = (b != null && (b.name == 'LW' || b.name == 'MW') && am_ssb_iq_drm)? true:false;
 	w3_visible('id-9-10-cell', show_9_10);
 
 	for (var i=0; i < num_step_buttons; i++) {
@@ -4006,7 +4914,7 @@ function bands_init()
 
 	for (i=0; i < bands.length; i++) {
 		var b = bands[i];
-		bands[i].chan = (typeof b.chan == "undefined")? 0 : b.chan;
+		bands[i].chan = isUndefined(b.chan)? 0 : b.chan;
 		b.min -= b.chan/2; b.max += b.chan/2;
 		
 		// fix LW/NDB/MW band definitions based on ITU region and MW channel spacing configuration settings
@@ -4022,8 +4930,11 @@ function bands_init()
 		
 		b.min *= 1000; b.max *= 1000; b.chan *= 1000;
 		var bw = b.max - b.min;
+		//console.log(b.name +' bw='+ bw);
 		for (z=zoom_nom; z >= 0; z--) {
-			if (bw <= bandwidth / (1 << z))
+		   var zbw = bandwidth / (1 << z);
+		   //console.log('z'+ z +' '+ (bw / zbw * 100).toFixed(0) +'%');
+			if (bw <= 0.80 * zbw)
 				break;
 		}
 		bands[i].zoom_level = z;
@@ -4050,7 +4961,7 @@ function find_band(freq)
 		b = bands[i];
 		if (b.region != "-" && b.region != "*" && b.region.charAt(0) != '>') continue;
 		if (freq >= b.min && freq <= b.max)
-			return b;;
+			return b;
 	}
 	return null;
 }
@@ -4096,40 +5007,40 @@ function mk_bands_scale()
 		if (min_inside && !max_inside) { x1 = b.min; x2 = r.end; } else
 		if (b.min < r.start && b.max > r.end) { x1 = r.start; x2 = r.end; }
 
-		if (x1) {
-			x = scale_px_from_freq(x1, g_range); var xx = scale_px_from_freq(x2, g_range);
-			w = xx - x;
-			//console.log("BANDS x="+x1+'/'+x+" y="+x2+'/'+xx+" w="+w);
-			if (w >= 3) {
-				band_ctx.fillStyle = b.s.color;
-				band_ctx.globalAlpha = 0.2;
-				//console.log("BB x="+x+" y="+y+" w="+w+" h="+h);
-				band_ctx.fillRect(x,y,w,h);
-				band_ctx.globalAlpha = 1;
+		if (x1 == 0) continue;
+ 
+      x = scale_px_from_freq(x1, g_range); var xx = scale_px_from_freq(x2, g_range);
+      w = xx - x;
+      //console.log("BANDS x="+x1+'/'+x+" y="+x2+'/'+xx+" w="+w);
+      if (w < 3) continue;
 
-				//band_ctx.fillStyle = "Black";
-				band_ctx.font = "bold 11px sans-serif";
-				band_ctx.textBaseline = "top";
-				var tx = x + w/2;
-				var txt = b.longName;
-				var mt = band_ctx.measureText(txt);
-				//console.log("BB mt="+mt.width+" txt="+txt);
-				if (w >= mt.width+4) {
-					;
-				} else {
-					txt = b.name;
-					mt = band_ctx.measureText(txt);
-					//console.log("BB mt="+mt.width+" txt="+txt);
-					if (w >= mt.width+4) {
-						;
-					} else {
-						txt = null;
-					}
-				}
-				//if (txt) console.log("BANDS tx="+(tx - mt.width/2)+" ty="+ty+" mt="+mt.width+" txt="+txt);
-				if (txt) band_ctx.fillText(txt, tx - mt.width/2, ty);
-			}
-		}
+      band_ctx.fillStyle = b.s.color;
+      band_ctx.globalAlpha = 0.2;
+      //console.log("BB x="+x+" y="+y+" w="+w+" h="+h);
+      band_ctx.fillRect(x,y,w,h);
+      band_ctx.globalAlpha = 1;
+
+      //band_ctx.fillStyle = "Black";
+      band_ctx.font = "bold 12px sans-serif";
+      band_ctx.textBaseline = "top";
+      var tx = x + w/2;
+      var txt = b.longName;
+      var mt = band_ctx.measureText(txt);
+      //console.log("BB mt="+mt.width+" txt="+txt);
+      if (w >= mt.width+4) {
+         ;     // long name fits in bar
+      } else {
+         txt = b.name;
+         mt = band_ctx.measureText(txt);
+         //console.log("BB mt="+mt.width+" txt="+txt);
+         if (w >= mt.width+4) {
+            ;  // short name fits in bar
+         } else {
+            txt = null;
+         }
+      }
+      //if (txt) console.log("BANDS tx="+(tx - mt.width/2)+" ty="+ty+" mt="+mt.width+" txt="+txt);
+      if (txt) band_ctx.fillText(txt, tx - mt.width/2, ty);
 	}
 }
 
@@ -4159,7 +5070,7 @@ var last_selected_band = 0;
 function select_band(v, mode)
 {
    var v_num = +v;
-   //console.log('select_band t/o_v='+ (typeof v) +' v_num='+ v_num);
+   //console.log('select_band t/o_v='+ typeof(v) +' v_num='+ v_num);
    if (!isNaN(v_num)) {
       //console.log('select_band num v='+ v_num);
       b = band_menu[v_num];
@@ -4182,9 +5093,9 @@ function select_band(v, mode)
 	}
 	
 	var freq;
-	if (typeof b.sel != "undefined") {
+	if (isDefined(b.sel)) {
 		freq = parseFloat(b.sel);
-		if (typeof mode == "undefined" && typeof b.sel == "string") {
+		if (isUndefined(mode) && isString(b.sel)) {
 			mode = b.sel.search(/[a-z]/i);
 			mode = (mode == -1)? null : b.sel.slice(mode);
 		}
@@ -4219,7 +5130,7 @@ function check_band(reset)
 		if ((reset != undefined && reset == -1) || ((car < band.min || car > band.max) && (pbc < band.min || pbc > band.max))) {
 	      //console.log('check_band OUTSIDE BAND RANGE reset='+ reset +' car='+ car +' pbc='+ pbc +' last_selected_band='+ last_selected_band);
 	      //console.log(band);
-			w3_select_value('select-band', 0);
+			w3_select_value('id-select-band', 0);
 			last_selected_band = 0;
 		}
 	}
@@ -4245,24 +5156,73 @@ function init_scale_dB()
 
 }
 
-var muted = false;
-var volume = 50;
-var f_volume = muted? 0 : volume/100;
-
 
 ////////////////////////////////
 // confirmation panel
 ////////////////////////////////
 
+var confirmation = {
+   displayed: false,
+   close_cb: null,
+};
+
 function confirmation_panel_init()
 {
    w3_el('id-panels-container').innerHTML +=
-      '<div id="id-confirmation" class="class-panel" data-panel-name="confirmation" data-panel-pos="center" data-panel-order="0" data-panel-size="600,100"></div>';
+      w3_div('id-confirmation class-panel|border: 1px solid white|data-panel-name="confirmation" data-panel-pos="center" data-panel-order="0" data-panel-size="600,100"');
 
-	var el = w3_el('id-confirmation');
-	el.innerHTML =
-		w3_divs('id-confirmation-container', 'class-panel-inner', '') +
-		w3_divs('id-confirmation-vis class-vis', '');
+	w3_innerHTML('id-confirmation',
+		w3_divs('id-confirmation-container/class-panel-inner') +
+		w3_div('id-confirmation-vis class-vis')
+	);
+}
+
+function confirmation_panel_set_close_func(close_cb)
+{
+	w3_el('id-confirmation-close').onclick = close_cb;    // hook the close icon
+	confirmation.close_cb = close_cb;
+}
+
+function confirmation_panel_init2()
+{
+   confirmation_panel_set_close_func(confirmation_panel_close);
+	w3_el('id-kiwi-body').addEventListener('keyup',
+	   function(evt) {
+	      if (evt.key == 'Escape') {
+	         confirmation.close_cb();
+            toggle_or_set_hide_panels(0);    // cancel panel hide mode
+	      }
+	   }, true);
+}
+
+function confirmation_show_content(s, w, h, close_cb, bg_color)
+{
+   // can't simply call confirmation_panel_close() here because of how panel is toggled
+   if (confirmation.displayed)
+      w3_color('id-confirmation', null, '');    // remove any user applied bg_color
+   
+   w3_innerHTML('id-confirmation-container', s);
+   w3_color('id-confirmation', null, bg_color);
+   
+   if (close_cb) confirmation_panel_set_close_func(close_cb);
+   confirmation_panel_show(w, h);
+   
+   // If panels hidden by e.g. 'x' key, and new panel brought up by menu action,
+   // then force panels visible again.
+   toggle_or_set_hide_panels(0);
+}
+
+function confirmation_panel_show(w, h)
+{
+	el = w3_el('id-confirmation');
+	el.style.zIndex = 1020;
+	if (w == undefined) w = 525;
+	if (h == undefined) h = 80;
+	confirmation_panel_resize(w, h);
+
+   //console.log('confirmation_panel_show CHECK was '+ confirmation.displayed);
+   confirmation.displayed = !confirmation.displayed;
+   toggle_panel('id-confirmation');
 }
 
 function confirmation_panel_resize(w, h)
@@ -4273,22 +5233,17 @@ function confirmation_panel_resize(w, h)
    el.style.bottom = px(window.innerHeight/2 - el.uiHeight/2);
 }
 
-function confirmation_panel_cancel()
+function confirmation_panel_close()
 {
-   toggle_panel('id-confirmation');
-}
-
-function confirmation_hook_close(id, func)
-{
-	w3_el('id-confirmation-close').onclick = func;     // hook the close icon
-	
-   var el = w3_el(id);
-	el.addEventListener('keyup', function(evt) {
-		//event_dump(evt, 'EXT');
-		if (evt.key == 'Escape' && evt.target.nodeName == 'INPUT') {
-	      func();
-	   }
-	}, false);
+   //console.log('confirmation_panel_close CHECK displayed='+ confirmation.displayed);
+   //kiwi_trace();
+   if (confirmation.displayed) {
+      w3_color('id-confirmation', null, '');    // remove any user applied bg_color
+      toggle_panel('id-confirmation');
+      confirmation_panel_set_close_func(confirmation_panel_close);   // set default
+      confirmation.displayed = false;
+      //console.log('confirmation_panel_close CLOSE');
+   }
 }
 
 
@@ -4301,42 +5256,45 @@ var cal_adc_new_adj;
 function cal_adc_dialog(new_adj, clk_diff, r1k, ppm)
 {
    var s;
-   cal_adc_new_adj = new_adj;
-   var adc_clock_ppm_limit = 100;
-   var hz_limit = ext_adc_clock_nom_Hz() * adc_clock_ppm_limit / 1e6;
-   
-   if (new_adj < -hz_limit || new_adj > hz_limit) {
-      console.log('cal ADC clock: ADJ TOO LARGE');
-      s = w3_col_percent('', 'w3-vcenter',
-            w3_div('w3-show-inline-block', 'ADC clock adjustment too large: '+ clk_diff +' Hz<br>' +
-               '(ADC clock '+ ppm.toFixed(1) +' ppm, limit is +/- '+ adc_clock_ppm_limit +' ppm)') +
-            w3_button('w3-red|margin-left:16px', 'Close', 'confirmation_panel_cancel'),
+   var gps_correcting = (cfg.ADC_clk_corr && ext_adc_gps_clock_corr() > 3)? 1:0;
+   if (gps_correcting) {
+      s = w3_col_percent('/w3-valign',
+            w3_div('w3-show-inline-block', 'GPS is automatically correcting ADC clock. <br> No manual calibration available.') +
+            w3_button('w3-red w3-margin-left', 'Close', 'confirmation_panel_close'),
             80
          );
    } else {
-      s = w3_col_percent('', 'w3-vcenter',
-            w3_div('w3-show-inline-block', 'ADC clock will be adjusted by<br>'+ clk_diff +' Hz to '+ r1k +' kHz<br>' +
-               '(ADC clock '+ ppm.toFixed(1) +' ppm)') +
-            w3_button('w3-green|margin-left:16px', 'Confirm', 'cal_adc_confirm') +
-            w3_button('w3-red|margin-left:16px', 'Cancel', 'confirmation_panel_cancel'),
-            80
-         );
+      cal_adc_new_adj = new_adj;
+      var adc_clock_ppm_limit = 100;
+      var hz_limit = ext_adc_clock_nom_Hz() * adc_clock_ppm_limit / 1e6;
+      
+      if (new_adj < -hz_limit || new_adj > hz_limit) {
+         console.log('cal ADC clock: ADJ TOO LARGE');
+         s = w3_col_percent('/w3-valign',
+               w3_div('w3-show-inline-block', 'ADC clock adjustment too large: '+ clk_diff +' Hz<br>' +
+                  '(ADC clock '+ ppm.toFixed(1) +' ppm, limit is +/- '+ adc_clock_ppm_limit +' ppm)') +
+               w3_button('w3-red w3-margin-left', 'Close', 'confirmation_panel_close'),
+               80
+            );
+      } else {
+         s = w3_col_percent('/w3-valign',
+               w3_div('w3-show-inline-block', 'ADC clock will be adjusted by<br>'+ clk_diff +' Hz to '+ r1k +' kHz<br>' +
+                  '(ADC clock '+ ppm.toFixed(1) +' ppm)') +
+               w3_button('w3-green w3-margin-left', 'Confirm', 'cal_adc_confirm') +
+               w3_button('w3-red w3-margin-left', 'Cancel', 'confirmation_panel_close'),
+               80
+            );
+      }
    }
    
-   w3_el('id-confirmation-container').innerHTML = s;
-	confirmation_hook_close('id-confirmation', confirmation_panel_cancel);
-	
-	var el = w3_el('id-confirmation');
-	el.style.zIndex = 1020;
-	confirmation_panel_resize(525, 70);
-   toggle_panel('id-confirmation');
+   confirmation_show_content(s, 525, 70);
 }
 
 function cal_adc_confirm()
 {
    ext_send('SET clk_adj='+ cal_adc_new_adj);
    ext_set_cfg_param('cfg.clk_adj', cal_adc_new_adj, true);
-   toggle_panel('id-confirmation');
+   confirmation_panel_close();
 }
 
 
@@ -4357,120 +5315,37 @@ function admin_pwd_cb(badp, isAdmin_true_cb)
 		return;
 	}
 
-	html('id-confirmation-container').innerHTML =
-		w3_col_percent('', 'w3-text-aqua',
-			w3_input('Admin password', 'admin.pwd', '', 'admin_pwd_cb2', 'admin password required'), 80
+	var s =
+		w3_col_percent('/w3-text-aqua',
+			w3_input('kiwi-pw', 'Admin password', 'admin.pwd', '', 'admin_pwd_cb2'), 80
 		);
-
-	confirmation_hook_close('id-confirmation', admin_pwd_cancel);
-
-	var el = html('id-confirmation');
-	el.style.zIndex = 1020;
-	confirmation_panel_resize(525, 80);
-   toggle_panel('id-confirmation');
+   confirmation_show_content(s, 525, 80);
 
 	// put the cursor in (i.e. select) the password field
 	w3_field_select('id-admin.pwd', {mobile:1});
 }
 
-function admin_pwd_cancel()
-{
-   toggle_panel('id-confirmation');
-}
-
 function admin_pwd_cb2(el, val)
 {
    w3_string_cb(el, val);
-   toggle_panel('id-confirmation');
+   confirmation_panel_close();
 	ext_valpwd('admin', val, ws_wf);
 }
 
 
 ////////////////////////////////
-// ext panel
+// dx labels
 ////////////////////////////////
 
-function ext_panel_init()
-{
-   w3_el('id-panels-container').innerHTML +=
-      '<div id="id-ext-controls" class="class-panel" data-panel-name="ext-controls" data-panel-pos="bottom-left" data-panel-order="0" data-panel-size="525,300"></div>';
-
-	var el = html('id-ext-data-container');
-	el.style.zIndex = 100;
-
-	el = html('id-ext-controls');
-	el.innerHTML =
-		w3_divs('id-ext-controls-container', 'class-panel-inner', '') +
-		w3_divs('id-ext-controls-vis class-vis', '');
-	
-	// close ext panel if escape key while input field has focus
-	el.addEventListener("keyup", function(evt) {
-		//event_dump(evt, 'EXT');
-		if (evt.key == 'Escape' && evt.target.nodeName == 'INPUT')
-			extint_panel_hide();
-	}, false);
-}
-
-var extint_using_data_container = false;
-
-function extint_panel_show(controls_html, data_html, show_func)
-{
-	extint_using_data_container = (data_html != null);
-	//console.log('extint_panel_show using_data_container='+ extint_using_data_container);
-
-	if (extint_using_data_container) {
-		w3_hide('id-top-container');
-		toggle_or_set_spec(toggle_e.SET, 0);
-		w3_show_block(w3_innerHTML('id-ext-data-container', data_html));
-	} else {
-		w3_hide('id-ext-data-container');
-		if (!spectrum_display)
-			w3_show_block('id-top-container');
-	}
-
-	// hook the close icon to call extint_panel_hide()
-	var el = html('id-ext-controls-close');
-	el.onclick = function() { toggle_panel("ext-controls"); extint_panel_hide(); };
-	//console.log('extint_panel_show onclick='+ el.onclick);
-	
-	var el = html('id-ext-controls-container');
-	el.innerHTML = controls_html;
-	//console.log(controls_html);
-	
-	if (show_func) show_func();
-	
-	el = html('id-ext-controls');
-	el.style.zIndex = 150;
-	//el.style.top = px((extint_using_data_container? height_spectrum_canvas : height_top_bar_parts) +157+10);
-	w3_visible(el, true);
-}
-
-function extint_panel_hide()
-{
-	//console.log('extint_panel_hide using_data_container='+ extint_using_data_container);
-
-	if (extint_using_data_container) {
-		w3_hide('id-ext-data-container');
-		w3_show_block('id-top-container');
-		extint_using_data_container = false;
-	}
-	
-	w3_visible('id-ext-controls', false);
-	//w3_visible('id-msgs', true);
-	
-	extint_blur_prev();
-	
-	// on close, reset extension menu
-	w3_select_value('select-ext', -1);
-	
-	resize_waterfall_container(true);	// necessary if an ext was present so wf canvas size stays correct
-   freqset_select();
-}
-
-
-////////////////////////////////
-// dx (markers)
-////////////////////////////////
+var dx = {
+   filter_ident: '',
+   filter_notes: '',
+   filter_case: 0,
+   filter_wild: 0,
+   filter_grep: 0,
+   ctrl_click: false,
+   displayed: [],
+};
 
 var dx_update_delay = 350;
 var dx_update_timeout, dx_seq=0;
@@ -4492,16 +5367,6 @@ function dx_update()
 
 // Why doesn't using addEventListener() to ignore mousedown et al not seem to work for
 // div elements created appending to innerHTML?
-
-var DX_MODE = 0xf;
-
-var DX_TYPE = 0xf0;
-var DX_TYPE_SFT = 4;
-var types = { 0:'active', 1:'watch-list', 2:'sub-band', 3:'DGPS', 4:'NoN' , 5:'interference' };
-var types_s = { active:0, watch_list:1, sub_band:2, DGPS:3, NoN:4 , interference:5 };
-var type_colors = { 0:'cyan', 0x10:'lightPink', 0x20:'aquamarine', 0x30:'lavender', 0x40:'violet' , 0x50:'violet' };
-
-var DX_FLAG = 0xff00;
 
 var dx_ibp_list, dx_ibp_interval, dx_ibp_server_time_ms, dx_ibp_local_time_epoch_ms = 0;
 var dx_ibp_freqs = { 14:0, 18:1, 21:2, 24:3, 28:4 };
@@ -4530,19 +5395,42 @@ var dx_ibp = [
 
 var dx_list = [];
 
-function dx(arr)
+function dx_label_cb(arr)
 {
 	var i;
 	var obj = arr[0];
+	
+	// reply to label step request
+	if (obj.t == 2) {
+	   var dl = arr[1];
+	   if (dl) {
+	      //console.log('dx_label_cb: type=2 f='+ dl.f);
+	      //console.log(dl);
+	      var mode = kiwi.modes_l[dl.b & DX_MODE];
+         freqmode_set_dsp_kHz(dl.f, mode);
+         if (dl.lo != 0 && dl.hi != 0) {
+            ext_set_passband(dl.lo, dl.hi);     // label has custom pb
+         } else {
+            var dpb = passbands[mode];
+            ext_set_passband(dpb.lo, dpb.hi);   // need to force default pb in case cpb is not default
+         }
+      } else {
+	      //console.log('dx_label_cb: type=2 NO LABEL FOUND');
+      }
+	   return;
+	}
 	
 	kiwi_clearInterval(dx_ibp_interval);
 	dx_ibp_list = [];
 	dx_ibp_server_time_ms = obj.s * 1000 + (+obj.m);
 	dx_ibp_local_time_epoch_ms = Date.now();
 	
+	dx_filter_field_err(+obj.f);
+	
 	var dx_idx, dx_z = 120;
 	dx_div.innerHTML = '';
 	var s = '';
+	dx.displayed = [];
 	
 	for (i = 1; i < arr.length; i++) {
 		obj = arr[i];
@@ -4552,10 +5440,11 @@ function dx(arr)
 		var moff = obj.o;
 		var flags = obj.b;
 		var ident = obj.i;
-		var notes = (typeof obj.n != 'undefined')? obj.n : '';
+		var notes = isDefined(obj.n)? obj.n : '';
+		var params = isDefined(obj.p)? obj.p : '';
 
 		var freqHz = freq * 1000;
-		var loff = passband_offset_dxlabel(modes_l[flags & DX_MODE]);	// always place label at center of passband
+		var loff = passband_offset_dxlabel(kiwi.modes_l[flags & DX_MODE]);	// always place label at center of passband
 		var x = scale_px_from_freq(freqHz + loff, g_range) - 1;	// fixme: why are we off by 1?
 		var cmkr_x = 0;		// optional carrier marker for NDBs
 		var carrier = freqHz - moff;
@@ -4565,26 +5454,29 @@ function dx(arr)
 		var h = dx_container_h - t;
 		var color = type_colors[flags & DX_TYPE];
 		if (ident == 'IBP' || ident == 'IARU%2fNCDXF') color = type_colors[0x20];		// FIXME: hack for now
-		//console.log("DX "+dx_seq+':'+dx_idx+" f="+freq+" o="+loff+" k="+moff+" F="+flags+" m="+modes_u[flags & DX_MODE]+" <"+ident+"> <"+notes+'>');
+		//console.log("DX "+dx_seq+':'+dx_idx+" f="+freq+" o="+loff+" k="+moff+" F="+flags+" m="+kiwi.modes_u[flags & DX_MODE]+" <"+ident+"> <"+notes+'>');
 		
 		carrier /= 1000;
-		dx_list[gid] = { "gid":gid, "carrier":carrier, "freq":freq, "moff":moff, "flags":flags, "ident":ident, "notes":notes };
+		dx_list[gid] = { "gid":gid, "carrier":carrier, "lo":obj.lo, "hi":obj.hi, "freq":freq, "moff":moff, "flags":flags, "ident":ident, "notes":notes, "params":params };
+      dx.displayed[dx_idx] = dx_list[gid];
 		//console.log(dx_list[gid]);
 		
 		s +=
-			'<div id="'+dx_idx+'-id-dx-label" class="class-dx-label '+ gid +'-id-dx-gid" style="left:'+(x-10)+'px; top:'+t+'px; z-index:'+dx_z+'; ' +
+			'<div id="'+dx_idx+'-id-dx-label" class="class-dx-label '+ gid +'-id-dx-gid'+ ((params != '')? ' id-has-ext':'') +'" ' +
+			   'style="left:'+(x-10)+'px; top:'+t+'px; z-index:'+dx_z+'; ' +
 				'background-color:'+ color +';" ' +
 				
 				// overrides underlying canvas listeners for the dx labels
-				'onmouseenter="dx_enter(this,'+ cmkr_x +')" onmouseleave="dx_leave(this,'+ cmkr_x +')" ' +
+				'onmouseenter="dx_enter(this,'+ cmkr_x +', event)" onmouseleave="dx_leave(this,'+ cmkr_x +')" ' +
 				'onmousedown="ignore(event)" onmousemove="ignore(event)" onmouseup="ignore(event)" ontouchmove="ignore(event)" ontouchend="ignore(event)" ' +
-				'onclick="dx_click(event,'+ gid +')" ontouchstart="dx_click(event,'+ gid +')">' +
+				'onclick="dx_click(event,'+ gid +')" ontouchstart="dx_click(event,'+ gid +')" name="'+ ((params == '')? 0:1) +'">' +
 			'</div>' +
 			'<div class="class-dx-line" id="'+dx_idx+'-id-dx-line" style="left:'+x+'px; top:'+t+'px; height:'+h+'px; z-index:110"></div>';
 		//console.log(s);
 		
 		dx_z++;
 	}
+	//console.log(dx.displayed);
 	
 	dx_div.innerHTML = s;
 
@@ -4592,7 +5484,8 @@ function dx(arr)
 		obj = arr[i];
 		dx_idx = i-1;
 		var ident = obj.i;
-		var notes = (typeof obj.n != 'undefined')? obj.n : '';
+		var notes = (isDefined(obj.n))? obj.n : '';
+		//var params = (isDefined(obj.p))? obj.p : '';
 		var el = w3_el(dx_idx +'-id-dx-label');
 		
 		try {
@@ -4636,7 +5529,136 @@ function dx(arr)
 	}
 }
 
-var dxo = { };
+function dx_filter()
+{
+	var s =
+		w3_div('w3-medium w3-text-aqua w3-bold', 'DX label filter') +
+		w3_divs('w3-text-aqua',
+		   w3_col_percent('',
+            w3_divs('/w3-margin-T-8',
+               w3_input('w3-label-inline/id-dx-filter-ident w3-retain-input-focus w3-input-any-change w3-padding-small', 'Ident', 'dx.filter_ident', dx.filter_ident, 'dx_filter_cb'),
+               w3_input('w3-label-inline/id-dx-filter-notes w3-retain-input-focus w3-input-any-change w3-padding-small', 'Notes', 'dx.filter_notes', dx.filter_notes, 'dx_filter_cb')
+            ), 90
+         ),
+         w3_inline('w3-halign-space-around w3-margin-T-8 w3-text-white/',
+            w3_checkbox('w3-retain-input-focus w3-label-inline w3-label-not-bold', 'case sensitive', 'dx.filter_case', dx.filter_case, 'dx_filter_opt_cb'),
+
+            // Wildcard pattern matching, in addition to grep, is implemented. But currently checkbox is not shown because
+            // there is no clear advantage in using it. E.g. it doesn't do partial matching like grep. So you have to type
+            // "*pattern*" to duplicate what simply typing "pattern" to grep would do. Neither of them has the syntax of e.g.
+            // simple search engines which is what the user probably really wants.
+            w3_inline('',
+               w3_text('', 'pattern match:'),
+               //w3_checkbox('w3-retain-input-focus w3-label-inline w3-label-not-bold', 'wildcard', 'dx.filter_wild', dx.filter_wild, 'dx_filter_opt_cb'),
+               w3_checkbox('w3-margin-left w3-retain-input-focus w3-label-inline w3-label-not-bold', 'grep', 'dx.filter_grep', dx.filter_grep, 'dx_filter_opt_cb')
+            )
+         )
+      );
+
+   confirmation_show_content(s, 450, 140, dx_filter_panel_close);
+   w3_field_select('id-dx-filter-ident', {mobile:1});    // select the field
+}
+
+// Use a custom panel close routine because we need to remove focus if any of our elements are the
+// active element at close time. This is due to how the w3-retain-input-focus logic works to keep
+function dx_filter_panel_close()
+{
+   //console.log('dx_filter_panel_close');
+   var ae = document.activeElement;
+   //console.log(ae);
+   if (ae && ae.id && (ae.id.startsWith('id-dx-filter') || ae.id.startsWith('id-dx.filter'))) {
+      //console.log('### activeElement='+ ae.id);
+      ae.blur();
+   }
+
+   confirmation_panel_close();
+}
+
+function dx_filter_cb(path, val, first, no_close)
+{
+   if (first) return;
+	w3_string_cb(path, val);
+	var filtered = (dx.filter_ident != '' || dx.filter_notes != '');
+   //console.log('dx_filter_cb path='+ path +' val='+ val +' filtered='+ filtered);
+   //console.log('DX_FILTER ident=<'+ dx.filter_ident +'> notes=<'+ dx.filter_notes +
+   //   '> case='+ dx.filter_case +' wild='+ dx.filter_wild +' grep='+ dx.filter_grep);
+	wf_send('SET DX_FILTER i='+ encodeURIComponent(dx.filter_ident +'x') +' n='+ encodeURIComponent(dx.filter_notes +'x') +
+	   ' c='+ dx.filter_case +' w='+ dx.filter_wild +' g='+ dx.filter_grep);
+	w3_remove_then_add('id-dx-container', 'whiteSmoke cl-dx-filtered', filtered? 'cl-dx-filtered' : 'whiteSmoke');
+	if (!filtered && !no_close) dx_filter_panel_close();
+}
+
+function dx_filter_opt_cb(path, val, first)
+{
+   if (first) return;
+   val = +val;
+   w3_bool_cb(path, val);
+   
+   // changing e.g. grep checkbox may clear ident/notes field error condition, so call dx_filter_cb() to update
+   // pass "no_close = true" to prevent panel closing if fields empty
+   dx_filter_cb('dx.filter_ident', dx.filter_ident, false, /* no_close */ true);
+
+   //console.log('dx_filter_opt_cb path='+ path +' val='+ val);
+   w3_checkbox_set(path, val);
+   
+   // wild and grep are exclusive
+   if (val && path != 'dx.filter_case') {
+      dx_filter_opt_cb((path == 'dx.filter_wild')? 'dx.filter_grep' : 'dx.filter_wild', 0);
+   }
+   w3_field_select('id-dx-filter-ident', {mobile:1});    // reselect the field
+}
+
+function dx_filter_field_err(err)
+{
+   //console.log('dx_filter_field_err='+ err);
+   w3_set_props('id-dx-filter-ident', 'w3-pink', err & 1);
+   w3_set_props('id-dx-filter-notes', 'w3-pink', err & 2);
+}
+
+// Step to next/prev visible label.
+// If at display extremes request that server search for next available label (possibly filtered).
+function dx_label_step(dir)
+{
+   //console.log('dx_label_step f='+ freq_car_Hz +'/'+ freq_displayed_Hz +' m='+ cur_mode);
+   var i, dl;
+   if (dir == 1) {
+      for (i = 0; i < dx.displayed.length; i++) {
+         dl = dx.displayed[i];
+         var f = Math.round(dl.freq * 1e3);
+         //console.log('consider #'+ i +' '+ f);
+         if (f > freq_displayed_Hz) break;
+      }
+      if (i == dx.displayed.length) {
+	      wf_send('SET MKR dir=1 freq='+ (freq_displayed_Hz/1e3).toFixed(3));
+         return;
+      }
+   } else {
+      for (i = dx.displayed.length - 1; i >= 0 ; i--) {
+         dl = dx.displayed[i];
+         var f = Math.round(dl.freq * 1e3);
+         //console.log('consider #'+ i +' '+ f);
+         if (f < freq_displayed_Hz) break;
+      }
+      if (i < 0) {
+	      wf_send('SET MKR dir=-1 freq='+ (freq_displayed_Hz/1e3).toFixed(3));
+         return;
+      }
+   }
+   
+   // after changing display to this frequency the normal dx_schedule_update() process will
+   // acquire a new set of labels
+   var mode = kiwi.modes_l[dl.flags & DX_MODE];
+   //console.log('FOUND #'+ i +' '+ f +' '+ dl.ident +' '+ mode +' '+ dl.lo +' '+ dl.hi);
+   freqmode_set_dsp_kHz(dl.freq, mode);
+   if (dl.lo != 0 && dl.hi != 0) {
+      ext_set_passband(dl.lo, dl.hi);     // label has custom pb
+   } else {
+      var dpb = passbands[mode];
+      //console.log(dpb);
+      ext_set_passband(dpb.lo, dpb.hi);   // need to force default pb in case cpb is not default
+   }
+}
+
 var dx_panel_customize = false;
 var dx_keys;
 
@@ -4670,13 +5692,15 @@ function dx_show_edit_panel2()
 		//console.log('DX EDIT new entry');
 		//console.log('DX EDIT new f='+ freq_car_Hz +'/'+ freq_displayed_Hz +' m='+ cur_mode);
 		dxo.f = freq_displayed_kHz_str;
-		dxo.o = 0;
-		dxo.m = modes_s[cur_mode];
+		dxo.lo = dxo.hi = dxo.o = 0;
+		dxo.m = kiwi.modes_s[cur_mode];
 		dxo.y = types_s.active;
-		dxo.i = dxo.n = '';
+		dxo.i = dxo.n = dxo.p = '';
 	} else {
 		//console.log('DX EDIT entry #'+ gid +' prev: f='+ dx_list[gid].freq +' flags='+ dx_list[gid].flags.toHex() +' i='+ dx_list[gid].ident +' n='+ dx_list[gid].notes);
 		dxo.f = dx_list[gid].carrier.toFixed(2);		// starts as a string, validated to be a number
+      dxo.lo = dx_list[gid].lo;
+      dxo.hi = dx_list[gid].hi;
 		dxo.o = dx_list[gid].moff;
 		dxo.m = (dx_list[gid].flags & DX_MODE);
 		dxo.y = ((dx_list[gid].flags & DX_TYPE) >> DX_TYPE_SFT);
@@ -4693,6 +5717,12 @@ function dx_show_edit_panel2()
 			dxo.n = 'bad URI decode';
 		}
 	
+		try {
+			dxo.p = decodeURIComponent(dx_list[gid].params);
+		} catch(ex) {
+			dxo.p = 'bad URI decode';
+		}
+	
 		//console.log('dxo.i='+ dxo.i +' len='+ dxo.i.length);
 	}
 	//console.log(dxo);
@@ -4706,31 +5736,43 @@ function dx_show_edit_panel2()
 		dxo.y = type;
 		var mode = dxo.m;
 		mode |= (type << DX_TYPE_SFT);
-		wf_send('SET DX_UPD g='+ dxo.gid +' f='+ dxo.f +' o='+ dxo.o.toFixed(0) +' m='+ mode +
-			' i='+ encodeURIComponent(dxo.i +'x') +' n='+ encodeURIComponent(dxo.n +'x'));
+		wf_send('SET DX_UPD g='+ dxo.gid +' f='+ dxo.f +' lo='+ dxo.lo.toFixed(0) +' hi='+ dxo.hi.toFixed(0) +' o='+ dxo.o.toFixed(0) +' m='+ mode +
+			' i='+ encodeURIComponent(dxo.i +'x') +' n='+ encodeURIComponent(dxo.n +'x') +' p='+ encodeURIComponent(dxo.p +'x'));
 		return;
 	}
 
 	extint_panel_hide();		// committed to displaying edit panel, so remove any ext panel
 	
 	dxo.f = (parseFloat(dxo.f) + cfg.freq_offset).toFixed(2);
+	
+	dxo.pb = '';
+	if (dxo.lo || dxo.hi) {
+      if (dxo.lo == -dxo.hi) {
+         dxo.pb = (Math.abs(dxo.hi)*2).toFixed(0);
+      } else {
+         dxo.pb = dxo.lo.toFixed(0) +', '+ dxo.hi.toFixed(0);
+      }
+	}
 
 	var s =
-		w3_divs('w3-rest w3-text-aqua', 'w3-margin-top',
-			w3_col_percent('', 'w3-hspace-8',
-				w3_input('Freq', 'dxo.f', dxo.f, 'dx_num_cb'), 30,
-				w3_select('', 'Mode', '', 'dxo.m', dxo.m, modes_u, 'dx_sel_cb'), 15,
-				w3_select('', 'Type', '', 'dxo.y', dxo.y, types, 'dx_sel_cb'), 25,
-				w3_input('Offset', 'dxo.o', dxo.o, 'dx_num_cb'), 25	// wraps if 30% used (100% total), why?
+		w3_div('w3-medium w3-text-aqua w3-bold', 'DX label edit') +
+		w3_divs('w3-text-aqua/w3-margin-T-8',
+         w3_inline('w3-hspace-16',
+				w3_input('w3-padding-small', 'Freq', 'dxo.f', dxo.f, 'dx_num_cb'),
+				w3_select('', 'Mode', '', 'dxo.m', dxo.m, kiwi.modes_u, 'dx_sel_cb'),
+				w3_input('w3-padding-small', 'Passband', 'dxo.pb', dxo.pb, 'dx_passband_cb'),
+				w3_select('', 'Type', '', 'dxo.y', dxo.y, types, 'dx_sel_cb'),
+				w3_input('w3-padding-small', 'Offset', 'dxo.o', dxo.o, 'dx_num_cb')
 			),
 		
-			w3_input('Ident', 'dxo.i', '', 'dx_string_cb'),
-			w3_input('Notes', 'dxo.n', '', 'dx_string_cb'),
+			w3_input('w3-label-inline/w3-padding-small w3-retain-input-focus', 'Ident', 'dxo.i', '', 'dx_string_cb'),
+			w3_input('w3-label-inline/w3-padding-small', 'Notes', 'dxo.n', '', 'dx_string_cb'),
+			w3_input('w3-label-inline/w3-padding-small', 'Extension', 'dxo.p', '', 'dx_string_cb'),
 		
-			w3_divs('', 'w3-show-inline-block w3-hspace-16',
-				w3_button('', 'Modify', 'dx_modify_cb'),
-				w3_button('', 'Add', 'dx_add_cb'),
-				w3_button('', 'Delete', 'dx_delete_cb')
+			w3_inline('w3-hspace-16',
+				w3_button('w3-yellow', 'Modify', 'dx_modify_cb'),
+				w3_button('w3-green', 'Add', 'dx_add_cb'),
+				w3_button('w3-red', 'Delete', 'dx_delete_cb')
 			)
 		);
 	
@@ -4739,35 +5781,14 @@ function dx_show_edit_panel2()
 		var el = w3_el('dxo.i');
 		el.value = dxo.i;
 		w3_el('dxo.n').value = dxo.n;
+		w3_el('dxo.p').value = dxo.p;
 		
 		// change focus to input field
-		// FIXME: why does this work after pwd panel, but not otherwise?
-		//console.log('el.value='+ el.value);
+		// FIXME: why doesn't field select work?
+		//console.log('dxo.i='+ el.value);
 		w3_field_select(el, {mobile:1});
 	});
-}
-
-/*
-	FIXME input validation issues:
-		data out-of-range
-		data missing
-		what should it mean? delete button, but params have been changed (e.g. freq)
-		SECURITY: can eval arbitrary code input?
-*/
-
-function dx_num_cb(el, val)
-{
-	w3_num_cb(el, val);
-}
-
-function dx_sel_cb(el, val)
-{
-	w3_string_cb(el, val);
-}
-
-function dx_string_cb(el, val)
-{
-	w3_string_cb(el, val);
+	ext_set_controls_width_height(525, 260);
 }
 
 function dx_close_edit_panel(id)
@@ -4790,8 +5811,8 @@ function dx_modify_cb(id, val)
 	mode |= type;
 	dxo.f -= cfg.freq_offset;
 	if (dxo.f < 0) dxo.f = 0;
-	wf_send('SET DX_UPD g='+ dxo.gid +' f='+ dxo.f +' o='+ dxo.o.toFixed(0) +' m='+ mode +
-		' i='+ encodeURIComponent(dxo.i +'x') +' n='+ encodeURIComponent(dxo.n +'x'));
+	wf_send('SET DX_UPD g='+ dxo.gid +' f='+ dxo.f +' lo='+ dxo.lo.toFixed(0) +' hi='+ dxo.hi.toFixed(0) +' o='+ dxo.o.toFixed(0) +' m='+ mode +
+		' i='+ encodeURIComponent(dxo.i +'x') +' n='+ encodeURIComponent(dxo.n +'x') +' p='+ encodeURIComponent(dxo.p +'x'));
 	setTimeout(function() {dx_close_edit_panel(id);}, 250);
 }
 
@@ -4804,8 +5825,8 @@ function dx_add_cb(id, val)
 	mode |= type;
 	dxo.f -= cfg.freq_offset;
 	if (dxo.f < 0) dxo.f = 0;
-	wf_send('SET DX_UPD g=-1 f='+ dxo.f +' o='+ dxo.o.toFixed(0) +' m='+ mode +
-		' i='+ encodeURIComponent(dxo.i +'x') +' n='+ encodeURIComponent(dxo.n +'x'));
+	wf_send('SET DX_UPD g=-1 f='+ dxo.f +' lo='+ dxo.lo.toFixed(0) +' hi='+ dxo.hi.toFixed(0) +' o='+ dxo.o.toFixed(0) +' m='+ mode +
+		' i='+ encodeURIComponent(dxo.i +'x') +' n='+ encodeURIComponent(dxo.n +'x') +' p='+ encodeURIComponent(dxo.p +'x'));
 	setTimeout(function() {dx_close_edit_panel(id);}, 250);
 }
 
@@ -4820,29 +5841,48 @@ function dx_delete_cb(id, val)
 
 function dx_click(ev, gid)
 {
+   //event_dump(ev, 'dx_click');
 	if (ev.shiftKey) {
 		dx_show_edit_panel(ev, gid);
 	} else {
-		mode = modes_l[dx_list[gid].flags & DX_MODE];
-		//console.log("DX-click f="+ dx_list[gid].freq +" mode="+ mode +" cur_mode="+ cur_mode);
-		freqmode_set_dsp_kHz(dx_list[gid].freq, mode);
+	   var freq = dx_list[gid].freq;
+		var mode = kiwi.modes_l[dx_list[gid].flags & DX_MODE];
+		var lo = dx_list[gid].lo;
+		var hi = dx_list[gid].hi;
+		//console.log("DX-click f="+ dx_list[gid].freq +" mode="+ mode +" cur_mode="+ cur_mode +' lo='+ lo +' hi='+ hi);
+		freqmode_set_dsp_kHz(freq, mode, { open_ext:true });
+		if (lo || hi) {
+		   ext_set_passband(lo, hi, undefined, freq);
+		}
+		
+		// open specified extension
+		if (!any_alternate_click_event(ev) && !dx.ctrl_click && dx_list[gid].params) {
+		   var p = decodeURIComponent(dx_list[gid].params);
+		   //console.log('### dx_click extension <'+ p +'>');
+         var ext = p.split(',');
+         extint.param = ext.slice(1).join(',');
+			extint_open(ext[0], 250);
+		}
+		
+		dx.ctrl_click = false;
 	}
 	return cancelEvent(ev);		// keep underlying canvas from getting event
 }
 
-// Any var we add to the div in dx() is undefined in the div that appears here,
-// so use the number embedded in id="" to create reference.
+// Any var we add to the div in dx_label() is undefined in the div that appears here,
+// so use the number embedded in id="" to create a reference.
 // Even the "data-" thing doesn't work.
 
 var dx_z_save, dx_bg_color_save;
 
-function dx_enter(dx, cmkr_x)
+function dx_enter(dx, cmkr_x, ev)
 {
 	dx_z_save = dx.style.zIndex;
 	dx.style.zIndex = 999;
 	dx_bg_color_save = dx.style.backgroundColor;
-	dx.style.backgroundColor = 'yellow';
-	var dx_line = html(parseInt(dx.id)+'-id-dx-line');
+	dx.style.backgroundColor = (w3_contains(dx, 'id-has-ext') && !any_alternate_click_event(ev))? 'magenta':'yellow';
+
+	var dx_line = w3_el(parseInt(dx.id)+'-id-dx-line');
 	dx_line.zIndex = 998;
 	dx_line.style.width = '3px';
 	
@@ -4856,7 +5896,8 @@ function dx_leave(dx, cmkr_x)
 {
 	dx.style.zIndex = dx_z_save;
 	dx.style.backgroundColor = dx_bg_color_save;
-	var dx_line = html(parseInt(dx.id)+'-id-dx-line');
+
+	var dx_line = w3_el(parseInt(dx.id)+'-id-dx-line');
 	dx_line.zIndex = 110;
 	dx_line.style.width = '1px';
 	
@@ -4881,7 +5922,6 @@ var SMETER_DISPLAY_RANGE = (SMETER_BIAS + SMETER_DISPLAY_MAX);
 var sMeter_dBm_biased = 0;
 var sMeter_ctx;
 var smeter_ovfl;
-var smeter_ovfl_test = 0;
 
 // 6 dB / S-unit
 var bars = {
@@ -4960,15 +6000,14 @@ function update_smeter()
 		}
 	}
 	
-	// ((smeter_ovfl_test++) & (16+8)) == (16+8)
 	if (audio_ext_adc_ovfl && !sm_ovfl_showing) {
-	   w3_hide('id-smeter-dbm-value');
+	   w3_hide('id-smeter-dbm-units');
 	   w3_show('id-smeter-ovfl');
 	   sm_ovfl_showing = true;
 	} else
 	if (!audio_ext_adc_ovfl && sm_ovfl_showing) {
 	   w3_hide('id-smeter-ovfl');
-	   w3_show('id-smeter-dbm-value');
+	   w3_show('id-smeter-dbm-units');
 	   sm_ovfl_showing = false;
 	}
 	
@@ -4989,7 +6028,8 @@ function ident_init()
 	var ident = initCookie('ident', '');
 	ident = kiwi_strip_tags(ident, '');
 	//console.log('IINIT ident_user=<'+ ident +'>');
-	html('id-input-ident').value = ident;
+	var el = w3_el('id-ident-input');
+	el.value = ident;
 	ident_user = ident;
 	need_ident = true;
 	//console.log('ident_init: SET ident='+ ident_user);
@@ -4997,34 +6037,272 @@ function ident_init()
 
 function ident_complete()
 {
-	kiwi_clearTimeout(ident_tout);
-	var obj = html('id-input-ident');
-	var ident = obj.value;
+	var el = w3_el('id-ident-input');
+	var ident = el.value;
 	ident = kiwi_strip_tags(ident, '');
-	obj.value = ident;
-	//console.log('ICMPL obj='+ (typeof obj) +' ident_user=<'+ ident +'>');
+	el.value = ident;
+	//console.log('ICMPL el='+ typeof(el) +' ident_user=<'+ ident +'>');
+	kiwi_clearTimeout(ident_tout);
+
 	// okay for ident='' to erase it
 	// SECURITY: size limited by <input size=...> but guard against binary data injection?
-	w3_field_select(obj, {mobile:1});
+	w3_field_select(el, {mobile:1});
 	writeCookie('ident', ident);
 	ident_user = ident;
 	need_ident = true;
 	//console.log('ident_complete: SET ident_user='+ ident_user);
 }
 
-function ident_keyup(obj, evt)
+function ident_keyup(el, evt)
 {
+	//event_dump(evt, "IKU");
 	kiwi_clearTimeout(ident_tout);
-	//console.log("IKU obj="+(typeof obj)+" val="+obj.value);
+	//console.log("IKU el="+ typeof(el) +" val="+ el.value);
 	
-	// ignore modifier keys used with mouse events that also appear here
-	if (ignore_next_keyup_event) {
-		//console.log("ignore shift-key ident_keyup");
-		ignore_next_keyup_event = false;
-		return;
+	// Ignore modifier keys used with mouse events that also appear here.
+	// Also keeps ident_complete timeout from being set after return key.
+	//if (ignore_next_keyup_event) {
+	if (evt != undefined && evt.key != undefined) {
+		var klen = evt.key.length;
+		if (any_alternate_click_event(evt) || klen != 1) {
+         //console.log("ignore shift-key ident_keyup");
+         //ignore_next_keyup_event = false;
+         return;
+      }
 	}
 	
 	ident_tout = setTimeout(ident_complete, 5000);
+}
+
+
+////////////////////////////////
+// keyboard shortcuts
+////////////////////////////////
+
+var shortcut = {
+   nav_off: 0,
+   keys: '',
+};
+
+function keyboard_shortcut_init()
+{
+   if (kiwi_isMobile() || kiwi_isFirefox() < 47 || kiwi_isChrome() <= 49 || kiwi_isOpera() <= 36) return;
+   
+   shortcut.help =
+      w3_div('',
+         w3_inline_percent('w3-padding-tiny w3-bold w3-text-aqua', 'Keys', 25, 'Function'),
+         w3_inline_percent('w3-padding-tiny', 'g =', 25, 'select frequency entry field'),
+         w3_inline_percent('w3-padding-tiny', 'j i LR-arrow-keys', 25, 'frequency step down/up, add shift or alt/ctrl for faster<br>shift plus alt/ctrl to step to next/prev DX label'),
+         w3_inline_percent('w3-padding-tiny', 't T', 25, 'scroll frequency memory list'),
+         w3_inline_percent('w3-padding-tiny', 'a d l u c f q', 25, 'select mode: AM DRM LSB USB CW NBFM IQ'),
+         w3_inline_percent('w3-padding-tiny', 'p P', 25, 'passband narrow/widen'),
+         w3_inline_percent('w3-padding-tiny', 'r', 25, 'toggle audio recording'),
+         w3_inline_percent('w3-padding-tiny', 'z Z', 25, 'zoom in/out, add alt/ctrl for max in/out'),
+         w3_inline_percent('w3-padding-tiny', '< >', 25, 'waterfall page down/up'),
+         w3_inline_percent('w3-padding-tiny', 'w W', 25, 'waterfall min dB slider -/+ 1 dB, add alt/ctrl for -/+ 10 dB'),
+         w3_inline_percent('w3-padding-tiny', 'S', 25, 'waterfall auto-scale'),
+         w3_inline_percent('w3-padding-tiny', 's D', 25, 'spectrum on/off toggle, slow device mode'),
+         w3_inline_percent('w3-padding-tiny', 'v V m', 25, 'volume less/more, mute'),
+         w3_inline_percent('w3-padding-tiny', 'o', 25, 'toggle between option bar "off" and "stats" mode,<br>others selected by related shortcut key'),
+         w3_inline_percent('w3-padding-tiny', '@', 25, 'DX label filter'),
+         w3_inline_percent('w3-padding-tiny', 'x y', 25, 'toggle visibility of control panels, top bar'),
+         w3_inline_percent('w3-padding-tiny', 'esc', 25, 'close/cancel action'),
+         w3_inline_percent('w3-padding-tiny', '? h', 25, 'toggle this help list'),
+         w3_inline_percent('w3-padding-tiny w3-bold w3-text-aqua', '', 25, 'Windows, Linux: use alt, not ctrl'),
+         w3_inline_percent('w3-padding-tiny w3-bold w3-text-aqua', '', 25, 'Mac: use ctrl or alt')
+      );
+
+	w3_el('id-kiwi-body').addEventListener('keydown', keyboard_shortcut_event, true);
+}
+
+function keyboard_shortcut_help()
+{
+   confirmation_show_content(shortcut.help, 550, 465);
+}
+
+// FIXME: animate (light up) control panel icons?
+
+function keyboard_shortcut_nav(nav)
+{
+   w3_el('id-nav-optbar-'+ nav).click();
+   shortcut.nav_click = true;
+}
+
+function keyboard_shortcut_key_proc()
+{
+   if (shortcut.key_i >= shortcut.keys.length) return;
+   var key = shortcut.keys[shortcut.key_i];
+   //console.log('key='+ key);
+   keyboard_shortcut(key, 0, 0);
+   shortcut.key_i++;
+   setTimeout(keyboard_shortcut_key_proc, 100);
+}
+
+function keyboard_shortcut_url_keys()
+{
+   shortcut.keys = shortcut.keys.split('');
+   shortcut.key_i = 0;
+   keyboard_shortcut_key_proc();
+}
+
+// abcdefghijklmnopqrstuvwxyz <>@? 0123456789.,/:kM
+// . .. .....F.. ............ .... FFFFFFFFFFFFFFFF   F = frequency entry keys
+//    .    ..  F  .  .. ..  .
+// ABCDEFGHIJKLMNOPQRSTUVWXYZ
+
+function keyboard_shortcut(key, mod, ctlAlt)
+{
+   var action = true;
+   var mode = ext_get_mode();
+   shortcut.nav_click = false;
+   
+   switch (key) {
+   
+   // mode
+   case 'a': ext_set_mode((mode == 'am')? 'amn' : 'am'); break;
+   case 'd': ext_set_mode('drm', null, { open_ext:true }); break;
+   case 'l': ext_set_mode((mode == 'lsb')? 'lsn' : 'lsb'); break;
+   case 'u': ext_set_mode((mode == 'usb')? 'usn' : 'usb'); break;
+   case 'c': ext_set_mode((mode == 'cw')? 'cwn' : 'cw'); break;
+   case 'f': ext_set_mode('nbfm'); break;
+   case 'q': ext_set_mode('iq'); break;
+   
+   // step
+   case 'j': case 'J': case 'ArrowLeft':  if (mod < 3) freqstep(2-mod); else dx_label_step(-1); break;
+   case 'i': case 'I': case 'ArrowRight': if (mod < 3) freqstep(3+mod); else dx_label_step(+1); break;
+   
+   // passband
+   case 'p': passband_increment(false); break;
+   case 'P': passband_increment(true); break;
+   
+   // volume/mute
+   case 'v': setvolume(1, volume-10); toggle_or_set_mute(0); keyboard_shortcut_nav('audio'); break;
+   case 'V': setvolume(1, volume+10); toggle_or_set_mute(0); keyboard_shortcut_nav('audio'); break;
+   case 'm': toggle_or_set_mute(); shortcut.nav_click = true; break;
+
+   // frequency entry / memory list
+   case 'g': case '=': freqset_select(); break;
+   case 't': freq_up_down_cb(null, 1); break;
+   case 'T': freq_up_down_cb(null, 0); break;
+
+   // page scroll
+   case '<': page_scroll(-page_scroll_amount); break;
+   case '>': page_scroll(+page_scroll_amount); break;
+
+   // zoom
+   case 'z': zoom_step(ctlAlt? ext_zoom.NOM_IN : ext_zoom.IN); break;
+   case 'Z': zoom_step(ctlAlt? ext_zoom.MAX_OUT : ext_zoom.OUT); break;
+   
+   // waterfall
+   case 'w': incr_mindb(1, ctlAlt? -10 : -1); keyboard_shortcut_nav('wf'); break;
+   case 'W': incr_mindb(1, ctlAlt? +10 : +1); keyboard_shortcut_nav('wf'); break;
+   
+   // spectrum
+   case 's': toggle_or_set_spec(); keyboard_shortcut_nav('wf'); break;
+   case 'S': wf_autoscale(); keyboard_shortcut_nav('wf'); break;
+   case 'D': toggle_or_set_slow_dev(); keyboard_shortcut_nav('wf'); break;
+
+   // misc
+   case 'o': keyboard_shortcut_nav(shortcut.nav_off? 'status':'off'); shortcut.nav_off ^= 1; break;
+   case 'r': toggle_or_set_rec(); break;
+   case 'x': toggle_or_set_hide_panels(); break;
+   case 'y': toggle_or_set_hide_topbar(); break;
+   case '@': dx_filter(); shortcut.nav_click = true; break;
+   case '?': case 'h': keyboard_shortcut_help(); break;
+
+   default: action = false; break;
+   
+   }
+   
+   if (action && !shortcut.nav_click) keyboard_shortcut_nav('users');
+
+   ignore_next_keyup_event = true;     // don't trigger e.g. freqset_keyup()/freqset_complete()
+}
+
+function keyboard_shortcut_event(evt)
+{
+   if (evt.target) {
+      var k = evt.key;
+      
+      // ignore esc and Fnn function keys
+      if (k == 'Escape' || k.match(/F[1-9][12]?/)) {
+         //event_dump(evt, 'Escape-shortcut');
+         //console.log('KEY PASS Esc');
+         return;
+      }
+      
+      var id = evt.target.id;
+      var suffix = '';
+      if (id == '') {
+         //event_dump(evt, 'shortcut');
+         w3_iterate_classList(evt.target, function(className, idx) {
+            if (className.startsWith('id-')) {
+               id = className;
+               suffix = ' (class)';
+               //console.log('KEY shortcut className='+ id + suffix +' ###');
+            }
+         });
+      }
+      
+      //{ event_dump(evt, 'shortcut'); return; }
+
+      var sft = evt.shiftKey;
+      var ctl = evt.ctrlKey;
+      var alt = evt.altKey;
+      var meta = evt.metaKey;
+      var ctlAlt = (ctl||alt);
+      var mod = (sft && !ctlAlt)? 1 : ( (!sft & ctlAlt)? 2 : ( (sft && ctlAlt)? 3:0 ) );
+
+      var field_input_key = (
+            (k >= '0' && k <= '9' && !ctl) ||
+            k == '.' || k == ',' ||                // ',' is alternate decimal point to '.'
+            k == '/' || k == ':' || k == '-' ||    // for passband spec, have to allow for negative passbands (e.g. lsb)
+            k == 'k' || k == 'M' ||                // scale modifiers
+            k == 'Enter' || k == 'ArrowUp' || k == 'ArrowDown' || k == 'Backspace' || k == 'Delete'
+         );
+
+      if (evt.target.nodeName != 'INPUT' || (id == 'id-freq-input' && !field_input_key)) {
+         
+         // don't interfere with the meta key shortcuts of the browser
+         if (kiwi_isOSX()) {
+            if (meta) {
+               //console.log('ignore OSX META '+ (k? k:''));
+               return;
+            }
+         } else {
+            if (ctl) {
+               //console.log('ignore non-OSX CTL '+ (k? k:''));
+               return;
+            }
+         }
+         
+         // evt.key isn't what you'd expect when evt.altKey
+         if (alt && !k.startsWith('Arrow')) {
+            //event_dump(evt, 'shortcut alt');
+            k = String.fromCharCode(evt.keyCode).toLowerCase();
+            if (sft) k = k.toUpperCase();
+            //console.log('shortcut alt k='+ k);
+         }
+         
+         keyboard_shortcut(k, mod, ctlAlt);
+         
+         /*
+         if (k != 'Shift' && k != 'Control' && evt.key != 'Alt') {
+            if (!action) event_dump(evt, 'shortcut');
+            console.log('KEY SHORTCUT <'+ k +'> '+ (sft? 'SFT ':'') + (ctl? 'CTL ':'') + (alt? 'ALT ':'') + (meta? 'META ':'') +
+               ((evt.target.nodeName == 'INPUT')? 'id-freq-input' : evt.target.nodeName) +
+               (action? ' ACTION':''));
+         }
+         */
+
+         cancelEvent(evt);
+         return;
+      } else {
+         //console.log('KEY INPUT FIELD <'+ k +'> '+ id + suffix);
+      }
+   } else {
+      //console.log('KEY no EVT');
+   }
 }
 
 
@@ -5033,101 +6311,126 @@ function ident_keyup(obj, evt)
 ////////////////////////////////
 
 var panel_margin = 10;
+var ac_play_button;
+
+function test_audio_suspended()
+{
+   //console.log('AudioContext.state='+ ac_play_button.state);
+   if (ac_play_button.state != "running") {
+      var s =
+         w3_div('id-play-button-container||onclick="play_button()"',
+            w3_div('id-play-button',
+               '<img src="gfx/openwebrx-play-button.png" width="150" height="150" /><br><br>' +
+               (kiwi_isMobile()? 'Tap to':'Click to') +' start OpenWebRX'
+            )
+         );
+      w3_appendElement('id-main-container', 'div', s);
+      el = w3_el('id-play-button');
+      el.style.marginTop = px(w3_center_in_window(el));
+      //alert('state '+ ac_play_button.state);
+   }
+}
 
 // called from waterfall_init()
 function panels_setup()
 {
    var el;
+   var s;
    
 	w3_el("id-ident").innerHTML =
-		'<form name="form_ident" action="#" onsubmit="ident_complete(); return false;">' +
-			'Your name or callsign:<br>' +
-			'<input id="id-input-ident" type="text" size=20 onkeyup="ident_keyup(this, event);">' +
+		'<form id="id-ident-form" action="#" onsubmit="ident_complete(); return false;">' +
+			w3_input('w3-label-not-bold/id-ident-input|padding:1px|size=20 onkeyup="ident_keyup(this, event)"', 'Your name or callsign:') +
 		'</form>';
 	
-	w3_el("id-control-1").innerHTML =
-	   w3_table_cells('id-freq-cell',
-		   '<form id="id-freq-form" name="form_freq" action="#" onsubmit="freqset_complete(0); return false;">' +
-			   w3_input_psa('id-freq-input|padding:0 4px;max-width:74px|size=8 onkeydown="freqset_keydown(event)" onkeyup="freqset_keyup(this, event)"') +
-			'</form>'
-		) +
+	w3_el("id-control-freq1").innerHTML =
+	   w3_inline('',
+         w3_div('id-freq-cell',
+            '<form id="id-freq-form" name="form_freq" action="#" onsubmit="freqset_complete(0); return false;">' +
+               w3_input('id-freq-input|padding:0 4px;max-width:74px|size=8 onkeydown="freqset_keydown(event)" onkeyup="freqset_keyup(this, event)"') +
+            '</form>'
+         ),
 
-	   w3_table_cells('|padding:0 0 0 3px',
-         w3_icon('w3-show-block w3-text-orange', 'fa-arrow-circle-up', 15, '', 'freq_up_down_cb', 1) +
-         w3_icon('w3-show-block w3-text-aqua', 'fa-arrow-circle-down', 15, '', 'freq_up_down_cb', 0)
-		) +
+         w3_div('|padding:0 0 0 3px',
+            w3_icon('w3-show-block w3-text-orange||title="prev"', 'fa-arrow-circle-up', 15, '', 'freq_up_down_cb', 1) +
+            w3_icon('w3-show-block w3-text-aqua||title="next"', 'fa-arrow-circle-down', 15, '', 'freq_up_down_cb', 0)
+         ),
 
-	   w3_table_cells('select-band-cell|padding:0 4px',
-		   '<select id="select-band" onchange="select_band(this.value)">' +
-				'<option value="0" selected disabled>select band</option>' +
-				setup_band_menu() +
-			'</select>'
-		) +
+         w3_div('id-select-band-cell|padding:0 4px',
+            '<select id="id-select-band" class="w3-pointer" onchange="select_band(this.value)">' +
+               '<option value="0" selected disabled>select band</option>' +
+               setup_band_menu() +
+            '</select>'
+         ),
 
-	   w3_table_cells('select-ext-cell|padding:0',
-		   '<select id="select-ext" onchange="freqset_select(); extint_select(this.value)">' +
-				'<option value="-1" selected disabled>extension</option>' +
-				extint_select_menu() +
-			'</select>'
-		);
+         w3_div('select-ext-cell|padding:0',
+            '<select id="select-ext" class="w3-pointer" onchange="freqset_select(); extint_select(this.value)">' +
+               '<option value="-1" selected disabled>extension</option>' +
+               extint_select_menu() +
+            '</select>'
+         )
+      );
 
-	if (kiwi_is_iOS() || kiwi_isChrome()) {
-	//if (true) {
-	   var show = true;
-	   
-	   if (kiwi_isChrome()) {
-	      // Because we don't know exactly when audio_init() will be called,
-	      // we create a new audio context here and check for the suspended state
-	      // if no-autoplay mode is in effect.
-	      // That determines if the "click to start" overlay is displayed or not.
-	      // If it is, then when it is clicked an attempt is made to resume() the
-	      // audio context that has most likely been setup by audio_init()
-	      // in the interim.
-         try {
-            window.AudioContext = window.AudioContext || window.webkitAudioContext;
-            var ac = new AudioContext();
-            console.log('AudioContext.state='+ ac.state);
-            if (ac.state == "running") show = false;
-         } catch(e) {
-            show = false;
-         }
+   // Because we don't know exactly when audio_init() will be called,
+   // we create a new audio context here and check for the suspended state
+   // if no-autoplay mode is in effect.
+   // That determines if the "click to start" overlay is displayed or not.
+   // If it is, then when it is clicked an attempt is made to resume() the
+   // audio context that has most likely been setup by audio_init()
+   // in the interim.
+   try {
+      window.AudioContext = window.AudioContext || window.webkitAudioContext;
+      ac_play_button = new AudioContext();
+      
+      // Safari has to play something before audioContext.state is valid
+      if (kiwi_isSafari()) {
+         var bufsrc = ac_play_button.createBufferSource();
+         bufsrc.connect(ac_play_button.destination);
+         try { bufsrc.start(0); } catch(ex) { bufsrc.noteOn(0); }
       }
       
-      if (show) {
-         var s =
-            w3_div('id-play-button-container||onclick="play_button()"',
-               w3_div('id-play-button',
-                  '<img src="gfx/openwebrx-play-button.png" /><br /><br />' +
-                  (kiwi_is_iOS()? 'Tap to':'Click to') +' start OpenWebRX'
-               )
-            );
-         w3_appendElement('id-main-container', 'div', s);
-         el = w3_el('id-play-button');
-         el.style.marginTop = px(w3_center_in_window(el));
-      }
-	}
+      setTimeout(test_audio_suspended, 500);    // check after a delay
+   } catch(e) {
+      console.log('#### no AudioContext?');
+   }
 	
-	w3_el("id-control-2").innerHTML =
-	   w3_table_cells('id-mouse-freq',
-	      w3_div('id-mouse-unit', '-----.--')
-	   ) +
-	   w3_table_cells('id-link-cell',
-		   w3_div('id-freq-link|padding-left:0px')
-		) +
-	   w3_table_cells('id-9-10-cell',
-		   w3_div('id-button-9-10 class-button-small||title="LW/MW 9/10 kHz tuning step" onclick="button_9_10()"', '10')
-		) +
-	   w3_table_cells('id-step-freq',
-			'<img id="id-step-0" src="icons/stepdn.20.png" onclick="freqstep(0)" />' +
-			'<img id="id-step-1" src="icons/stepdn.18.png" onclick="freqstep(1)" style="padding-bottom:1px" />' +
-			'<img id="id-step-2" src="icons/stepdn.16.png" onclick="freqstep(2)" style="padding-bottom:2px" />' +
-			'<img id="id-step-3" src="icons/stepup.16.png" onclick="freqstep(3)" style="padding-bottom:2px" />' +
-			'<img id="id-step-4" src="icons/stepup.18.png" onclick="freqstep(4)" style="padding-bottom:1px" />' +
-			'<img id="id-step-5" src="icons/stepup.20.png" onclick="freqstep(5)" />'
-		) +
-	   w3_table_cells('',
-	      //'<div id="button-spectrum" class="class-button" onclick="toggle_or_set_spec();">Spectrum</div>'
-		   w3_button('id-button-spectrum class-button', 'Spec', 'toggle_or_set_spec')
+	w3_el("id-control-freq2").innerHTML =
+	   w3_inline('w3-halign-space-between w3-margin-T-4/',
+         w3_div('id-mouse-freq',
+            w3_div('id-mouse-unit', '-----.--')
+         ),
+         w3_div('id-link-cell',
+            w3_div('id-freq-link|padding-left:0px')
+         ),
+         w3_div('id-9-10-cell',
+            w3_div('id-button-9-10 class-button-small||title="LW/MW 9/10 kHz tuning step" onclick="button_9_10()"', '10')
+         ),
+         w3_div('id-step-freq',
+            '<img id="id-step-0" src="icons/stepdn.20.png" onclick="freqstep(0)" />',
+            '<img id="id-step-1" src="icons/stepdn.18.png" onclick="freqstep(1)" style="padding-bottom:1px" />',
+            '<img id="id-step-2" src="icons/stepdn.16.png" onclick="freqstep(2)" style="padding-bottom:2px" />',
+            '<img id="id-step-3" src="icons/stepup.16.png" onclick="freqstep(3)" style="padding-bottom:2px" />',
+            '<img id="id-step-4" src="icons/stepup.18.png" onclick="freqstep(4)" style="padding-bottom:1px" />',
+            '<img id="id-step-5" src="icons/stepup.20.png" onclick="freqstep(5)" />'
+         ),
+         w3_div('',
+            w3_button('id-button-spectrum class-button', 'Spec', 'toggle_or_set_spec')
+         ),
+         w3_div('',
+            w3_div('fa-stack||title="record"',
+               w3_icon('id-rec1', 'fa-circle fa-nudge-down fa-stack-2x w3-text-pink', 22, '', 'toggle_or_set_rec'),
+               w3_icon('id-rec2', 'fa-stop fa-stack-1x w3-text-pink w3-hide', 10, '', 'toggle_or_set_rec')
+            )
+         ),
+         w3_div('|width:8%|title="mute"',
+            // from https://jsfiddle.net/cherrador/jomgLb2h since fa doesn't have speaker-slash
+            w3_div('id-mute-no fa-stack|width:100%;',
+               w3_icon('', 'fa-volume-up fa-stack-2x fa-nudge-right-OFF', 24, 'lime', 'toggle_or_set_mute')
+            ),
+            w3_div('id-mute-yes fa-stack w3-hide|width:100%;color:magenta;',  // hsl(340, 82%, 60%) w3-text-pink but lighter
+               w3_icon('', 'fa-volume-off fa-stack-2x fa-nudge-left', 24, '', 'toggle_or_set_mute'),
+               w3_icon('', 'fa-times fa-right fa-nudge-left-OFF', 12, '', 'toggle_or_set_mute')
+            )
+         )
       );
 	
 	if (!isNaN(override_9_10)) {
@@ -5146,44 +6449,47 @@ function panels_setup()
 	
 	button_9_10(step_9_10);
 
-	w3_el("id-control-mode").innerHTML =
-	   w3_table_cells('',
-		   '<div id="button-am" class="class-button" onclick="mode_button(event, \'am\')" onmousedown="cancelEvent(event)" onmouseover="mode_over(event)">AM</div>',
-		   '<div id="button-amn" class="class-button" onclick="mode_button(event, \'amn\')" onmousedown="cancelEvent(event)" onmouseover="mode_over(event)">AMN</div>',
-		   '<div id="button-lsb" class="class-button" onclick="mode_button(event, \'lsb\')" onmousedown="cancelEvent(event)" onmouseover="mode_over(event)">LSB</div>',
-		   '<div id="button-usb" class="class-button" onclick="mode_button(event, \'usb\')" onmousedown="cancelEvent(event)" onmouseover="mode_over(event)">USB</div>',
-		   '<div id="button-cw" class="class-button" onclick="mode_button(event, \'cw\')" onmousedown="cancelEvent(event)" onmouseover="mode_over(event)">CW</div>',
-		   '<div id="button-cwn" class="class-button" onclick="mode_button(event, \'cwn\')" onmousedown="cancelEvent(event)" onmouseover="mode_over(event)">CWN</div>',
-		   '<div id="button-nbfm" class="class-button" onclick="mode_button(event, \'nbfm\')" onmousedown="cancelEvent(event)" onmouseover="mode_over(event)">NBFM</div>',
-		   '<div id="button-iq" class="class-button" onclick="mode_button(event, \'iq\')" onmousedown="cancelEvent(event)" onmouseover="mode_over(event)">IQ</div>'
-		);
+	s = '';
+   mode_buttons.forEach(
+	   function(mba, i) {
+	      var ms = mba.s[0];
+	      var mslc = ms.toLowerCase();
+	      var disabled = mba.dis || (mslc == 'drm' && !kiwi.DRM_enable);
+	      var attr = disabled? '' : ' onclick="mode_button(event, this)"';
+	      attr += ' onmouseover="mode_over(event, this)"';
+	      s += w3_div('id-button-'+ mslc + ' id-mode-'+ mslc.substr(0,2) +
+	         ' class-button'+ (disabled? ' class-button-disbled':'') +
+	         ' ||id="'+ i +'-id-mode-col"' + attr + ' onmousedown="cancelEvent(event)"', ms);
+	   });
+	w3_el("id-control-mode").innerHTML = w3_inline('w3-halign-space-between/', s);
+
+   var d = audioFFT_active? ' w3-disabled' : '';
+   var d2 = audioFFT_active? ' w3-disabled||onclick="audioFFT_update()"' : '';
 
 	w3_el("id-control-zoom").innerHTML =
-	   w3_table_cells('',
-		   w3_div('id-zoom-in class-icon||onclick="zoom_click(event,1)" onmouseover="zoom_over(event)" title="zoom in"', '<img src="icons/zoomin.png" width="32" height="32" />'),
-		   w3_div('id-zoom-out class-icon||onclick="zoom_click(event,-1)" onmouseover="zoom_over(event)" title="zoom out"', '<img src="icons/zoomout.png" width="32" height="32" />')
-		) +
-	   w3_table_cells('id-maxin',
-		   w3_div('class-icon||onclick="zoom_click(event,8)" title="max in"', '<img src="icons/maxin.png" width="32" height="32" />')
-		) +
-	   w3_table_cells('id-maxin-nom w3-hide',
-		   w3_div('class-icon||onclick="zoom_click(event,8)" title="max in"', '<img src="icons/maxin.nom.png" width="32" height="32" />')
-		) +
-	   w3_table_cells('id-maxin-max w3-hide',
-		   w3_div('class-icon||onclick="zoom_click(event,8)" title="max in"', '<img src="icons/maxin.max.png" width="32" height="32" />')
-		) +
-	   w3_table_cells('id-maxout',
-		   w3_div('class-icon||onclick="zoom_click(event,-9)" title="max out"', '<img src="icons/maxout.png" width="32" height="32" />')
-		) +
-	   w3_table_cells('id-maxout-max w3-hide',
-		   w3_div('class-icon||onclick="zoom_click(event,-9)" title="max out"', '<img src="icons/maxout.max.png" width="32" height="32" />')
-		) +
-	   w3_table_cells('',
-		   w3_div('class-icon||onclick="zoom_click(event,0)" title="zoom to band"',
-			   '<img src="icons/zoomband.png" width="32" height="16" style="padding-top:13px; padding-bottom:13px;"/>'
-	      ),
-		   w3_div('class-icon||onclick="page_scroll(-'+ page_scroll_amount +')" title="page down"', '<img src="icons/pageleft.png" width="32" height="32" />'),
-		   w3_div('class-icon||onclick="page_scroll('+ page_scroll_amount +')" title="page up"', '<img src="icons/pageright.png" width="32" height="32" />')
+	   w3_inline('w3-halign-space-between/',
+         w3_div('id-zoom-in class-icon'+ d +'||onclick="zoom_click(event,1)" onmouseover="zoom_over(event)" title="zoom in"', '<img src="icons/zoomin.png" width="32" height="32" />'),
+         w3_div('id-zoom-out class-icon'+ d +'||onclick="zoom_click(event,-1)" onmouseover="zoom_over(event)" title="zoom out"', '<img src="icons/zoomout.png" width="32" height="32" />'),
+         w3_div('id-maxin'+ d2,
+            w3_div('class-icon||onclick="zoom_click(event,8)" title="max in"', '<img src="icons/maxin.png" width="32" height="32" />')
+         ),
+         w3_div('id-maxin-nom w3-hide'+ d2,
+            w3_div('class-icon||onclick="zoom_click(event,8)" title="max in"', '<img src="icons/maxin.nom.png" width="32" height="32" />')
+         ),
+         w3_div('id-maxin-max w3-hide'+ d2,
+            w3_div('class-icon||onclick="zoom_click(event,8)" title="max in"', '<img src="icons/maxin.max.png" width="32" height="32" />')
+         ),
+         w3_div('id-maxout'+ d2,
+            w3_div('class-icon||onclick="zoom_click(event,-9)" title="max out"', '<img src="icons/maxout.png" width="32" height="32" />')
+         ),
+         w3_div('id-maxout-max w3-hide'+ d2,
+            w3_div('class-icon||onclick="zoom_click(event,-9)" title="max out"', '<img src="icons/maxout.max.png" width="32" height="32" />')
+         ),
+         w3_div('class-icon'+ d +'||onclick="zoom_click(event,0)" title="zoom to band"',
+            '<img src="icons/zoomband.png" width="32" height="16" style="padding-top:13px; padding-bottom:13px;"/>'
+         ),
+         w3_div('class-icon'+ d +'||onclick="page_scroll_icon_click(event,'+ -page_scroll_amount +')" title="page down\nalt: label step"', '<img src="icons/pageleft.png" width="32" height="32" />'),
+         w3_div('class-icon'+ d +'||onclick="page_scroll_icon_click(event,'+ page_scroll_amount +')" title="page up\nalt: label step"', '<img src="icons/pageright.png" width="32" height="32" />')
 		);
 
 
@@ -5210,126 +6516,162 @@ function panels_setup()
 	var psa1 = ' w3-center|width:15.2%';
 	var psa2 = psa1 + ';margin-right:6px';
 	w3_el('id-optbar').innerHTML =
-      '<nav class="w3-navbar cl-optbar">' +
-         w3_navdef(optbar_colors[ci++] + psa2, 'WF', 'optbar-wf', 'optbar') +
-         w3_nav(optbar_colors[ci++] + psa2, 'Audio', 'optbar-audio', 'optbar') +
-         w3_nav(optbar_colors[ci++] + psa2, 'AGC', 'optbar-agc', 'optbar') +
-         w3_nav(optbar_colors[ci++] + psa2, 'Users', 'optbar-users', 'optbar') +
-         w3_nav(optbar_colors[ci++] + psa2, 'Stats', 'optbar-status', 'optbar') +
-         w3_nav(optbar_colors[ci++] + psa1, 'Off', 'optbar-off', 'optbar') +
-      '</nav>';
+      w3_navbar('cl-optbar',
+         // will call optbar_focus() optbar_blur() when navbar clicked
+         w3_navdef(optbar_colors[ci++] + psa2, 'WF', 'optbar-wf', 'optbar'),
+         w3_nav(optbar_colors[ci++] + psa2, 'Audio', 'optbar-audio', 'optbar'),
+         w3_nav(optbar_colors[ci++] + psa2, 'AGC', 'optbar-agc', 'optbar'),
+         w3_nav(optbar_colors[ci++] + psa2, 'Users', 'optbar-users', 'optbar'),
+         w3_nav(optbar_colors[ci++] + psa2, 'Stats', 'optbar-status', 'optbar'),
+         w3_nav(optbar_colors[ci++] + psa1, 'Off', 'optbar-off', 'optbar')
+      );
 
 
-   // wf
+	wf_filter = readCookie('last_wf_filter');
+	if (wf_filter == null) wf_filter = wf_sp_menu_e.OFF;
+	spec_filter = readCookie('last_spec_filter');
+	if (spec_filter == null) spec_filter = wf_sp_menu_e.IIR;
+	
+   if (isString(spectrum_show)) {
+      var ss = spectrum_show.toLowerCase();
+      wf_sp_menu_s.forEach(function(e, i) { if (ss == e.toLowerCase()) spec_filter = i; });
+   }
+   
 	w3_el("id-optbar-wf").innerHTML =
-      w3_col_percent('w3-vcenter', '',
+      w3_col_percent('',
          w3_div('',
-            w3_col_percent('w3-vcenter', 'class-slider',
-               w3_text(optbar_prefix_color, 'WF max'), 21,
-               '<input id="input-maxdb" type="range" min="-100" max="20" value="'+ maxdb +'" step="1" onchange="setmaxdb(1,this.value)" oninput="setmaxdb(0, this.value)">', 61,
-               w3_divs('field-maxdb class-slider', ''), 18
+            w3_col_percent('w3-valign/class-slider',
+               w3_text(optbar_prefix_color, 'WF max'), 19,
+               '<input id="id-input-maxdb" type="range" min="-100" max="20" value="'+ maxdb
+                  +'" step="1" onchange="setmaxdb(1,this.value)" oninput="setmaxdb(0, this.value)">', 60,
+               w3_div('id-field-maxdb class-slider'), 19
             ),
-            w3_col_percent('w3-vcenter', 'class-slider',
-               w3_text(optbar_prefix_color, 'WF min'), 21,
-               '<input id="input-mindb" type="range" min="-190" max="-30" value="'+ mindb +'" step="1" onchange="setmindb(1,this.value)" oninput="setmindb(0, this.value)">', 61,
-               w3_divs('field-mindb class-slider', ''), 18
+            w3_col_percent('w3-valign/class-slider',
+               w3_text(optbar_prefix_color, 'WF min'), 19,
+               '<input id="id-input-mindb" type="range" min="-190" max="-30" value="'+ mindb
+                  +'" step="1" onchange="setmindb(1,this.value)" oninput="setmindb(0, this.value)">', 60,
+               w3_div('id-field-mindb class-slider'), 19
+            ),
+            w3_col_percent('w3-valign/class-slider',
+               w3_text(optbar_prefix_color, 'WF rate'), 19,
+               '<input id="slider-rate" class="'+ d +'" type="range" min="0" max="4" value="'+
+                  wf_speed +'" step="1" onchange="setwfspeed(1,this.value)" oninput="setwfspeed(0,this.value)">', 60,
+               w3_div('slider-rate-field class-slider'), 19
+            ),
+
+            w3_col_percent('w3-valign/class-slider',
+               //w3_text(optbar_prefix_color, 'SP parm'), 19,
+               w3_button('id-wf-sp-button class-button', 'Spec &Delta;', 'toggle_or_set_wf_sp_button'), 19,
+               w3_slider('id-wf-sp-slider', '', 'wf_sp_param', wf_sp_param, 0, 10, 1, 'wf_sp_slider_cb'), 60,
+               w3_div('id-wf-sp-slider-field class-slider'), 19
+            ),
+
+            w3_inline('w3-halign-space-around w3-margin-T-6/',
+               w3_select('|color:red', '', 'colormap', 'wf.cmap', wf.cmap, wf_cmap_s, 'wf_cmap_cb'),
+               //w3_select('|color:red', '', 'contrast', 'wf.contr', W3_SELECT_SHOW_TITLE, wf_contr_s, 'wf_contr_cb'),
+               w3_select('|color:red', '', 'wf', 'wf_filter', wf_filter, wf_sp_menu_s, 'wf_sp_menu_cb', 1),
+               w3_select('|color:red', '', 'spec', 'spec_filter', spec_filter, wf_sp_menu_s, 'wf_sp_menu_cb', 0),
+               w3_div('w3-hcenter', w3_button('id-button-spec-peak class-button', 'Peak', 'toggle_or_set_spec_peak'))
             )
          ), 85,
-         //w3_div(), 17
-			w3_div('w3-hcenter', w3_button('id-button-wf-autoscale class-button', 'Auto<br>Scale', 'wf_autoscale')), 15
-      ) +
-		w3_col_percent('w3-vcenter', 'class-slider',
-         w3_text(optbar_prefix_color, 'WF rate'), 18,
-         '<input id="slider-rate" type="range" min="0" max="4" value="'+ wf_speed +'" step="1" onchange="setwfspeed(1,this.value)" oninput="setwfspeed(0,this.value)">', 52,
-			w3_div('slider-rate-field class-slider'), 15,
-			w3_div('w3-hcenter', w3_button('id-button-slow-dev class-button', 'Slow<br>Dev', 'toggle_or_set_slow_dev')), 15
-		) +
-		w3_select('w3-margin-R-10|color:red', '', 'colormap', 'wf.cmap', W3_SELECT_SHOW_TITLE, wf_cmap_s, 'wf_cmap_cb') +
-		w3_select('w3-margin-R-10|color:red', '', 'contrast', 'wf.contr', W3_SELECT_SHOW_TITLE, wf_contr_s, 'wf_contr_cb') +
-		w3_select('|color:red', '', 'spec filter', 'wf_spec_filter', W3_SELECT_SHOW_TITLE, spec_filter_s, 'spec_filter_cb');
-		//'add colormap control ...';
+         w3_div('',
+            w3_div('w3-hcenter w3-margin-T-2 w3-margin-B-10', w3_button('id-button-wf-autoscale class-button', 'Auto<br>Scale', 'wf_autoscale')),
+            w3_div('w3-hcenter w3-margin-B-10', w3_button('id-button-slow-dev class-button', 'Slow<br>Dev', 'toggle_or_set_slow_dev')),
+            w3_div('w3-hcenter w3-margin-T-16', w3_button('id-button-wf-gnd class-button w3-momentary', 'GND', 'wf_gnd_cb', 1))
+         ), 15
+      );
+      
    setwfspeed(1, wf_speed);
    toggle_or_set_slow_dev(toggle_e.FROM_COOKIE | toggle_e.SET, 0);
+   toggle_or_set_spec_peak(toggle_e.FROM_COOKIE | toggle_e.SET_URL, peak_initially);
+   toggle_or_set_wf_sp_button(toggle_e.FROM_COOKIE | toggle_e.SET, 0);
 
 
    // audio & nb
+	de_emphasis = readCookie('last_de_emphasis');
+	if (de_emphasis == null) de_emphasis = 0;
+
+	pan = readCookie('last_pan');
+	if (pan == null) pan = 0;
+
 	w3_el('id-optbar-audio').innerHTML =
-		w3_col_percent('w3-vcenter', 'class-slider',
+		w3_col_percent('w3-valign/class-slider',
 			w3_div('w3-show-inline-block', w3_text(optbar_prefix_color, 'Noise gate')), 20,
 			'<input id="input-noise-gate" type="range" min="100" max="5000" value="'+ noiseGate +'" step="100" onchange="setNoiseGate(1,this.value)" oninput="setNoiseGate(0,this.value)">', 50,
-			w3_divs('field-noise-gate w3-show-inline-block', '', noiseGate.toString()) +' uS', 15,
-			w3_div('w3-hcenter', w3_div('id-button-nb class-button||onclick="toggle_or_set_nb();"', 'NB')), 15
+			w3_div('field-noise-gate w3-show-inline-block', noiseGate.toString()) +' uS', 15,
+			w3_div('w3-hcenter', w3_div('id-button-nb class-button||title="noise blanker"; onclick="toggle_or_set_nb();"', 'NB')), 15
 		) +
-		w3_col_percent('w3-vcenter', 'class-slider',
+		w3_col_percent('w3-valign/class-slider',
 			w3_div('w3-show-inline-block', w3_text(optbar_prefix_color +' cl-closer-spaced-label-text', 'Noise<br>threshold')), 20,
 			'<input id="input-noise-th" type="range" min="0" max="100" value="'+ noiseThresh +'" step="1" onchange="setNoiseThresh(1,this.value)" oninput="setNoiseThresh(0,this.value)">', 50,
-			w3_divs('field-noise-th w3-show-inline-block', '', noiseThresh.toString()) +'%', 15,
-			w3_div('w3-hcenter', w3_div('id-button-nb-test class-button||onclick="toggle_nb_test();"', 'Test')), 15
+			w3_div('field-noise-th w3-show-inline-block', noiseThresh.toString()) +'%', 15,
+		   w3_button('id-button-compression class-button w3-hcenter||title="compression"', 'Comp', 'toggle_or_set_compression'), 15
 		) +
-		w3_col_percent('w3-vcenter w3-margin-TB-4', 'class-slider',
+		w3_col_percent('w3-valign w3-margin-TB-4/',
 			w3_div('w3-show-inline-block', w3_text(optbar_prefix_color, 'LMS filter')), 25,
-			w3_div('',
-            w3_checkbox('', '', 'lms.denoise', false, 'lms_denoise_cb'),
-            ' Denoiser'
+			w3_div('w3-valign',
+            w3_checkbox('w3-label-inline w3-label-not-bold', 'Denoiser', 'lms.denoise', false, 'lms_denoise_load_cb')
          ), 30,
-			w3_div('',
-            w3_checkbox('', '', 'lms.autonotch', false, 'lms_autonotch_cb'),
-            ' Autonotch'
+			w3_div('w3-valign',
+            w3_checkbox('w3-label-inline w3-label-not-bold', 'Autonotch', 'lms.autonotch', false, 'lms_autonotch_load_cb')
          ), 30,
 			w3_div('w3-hcenter', w3_div('id-button-lms-ext class-button||onclick="extint_open(\'LMS\'); freqset_select();"', 'More')), 15
 		) +
-		w3_col_percent('w3-vcenter', 'class-slider',
+		w3_col_percent('w3-valign/class-slider',
 			w3_text(optbar_prefix_color, 'Volume'), 20,
-			'<input id="input-volume" type="range" min="0" max="200" value="'+ volume +'" step="1" onchange="setvolume(1, this.value)" oninput="setvolume(0, this.value)">', 50,
-			w3_div('w3-hcenter', w3_div('id-button-pref class-button|visibility:hidden|onclick="show_pref();"', 'Pref')), 15,
-			w3_div('w3-hcenter', w3_div('id-button-mute class-button||onclick="toggle_mute();"', 'Mute')), 15
+			'<input id="id-input-volume" type="range" min="0" max="200" value="'+ volume +'" step="1" onchange="setvolume(1, this.value)" oninput="setvolume(0, this.value)">', 35,
+         w3_select('|color:red', '', 'de-emp', 'de_emphasis', de_emphasis, de_emphasis_s, 'de_emp_cb'), 30,
+			//w3_div('w3-hcenter', w3_div('id-button-pref class-button|visibility:hidden|onclick="show_pref();"', 'Pref')), 15,
+			w3_div('w3-hcenter', w3_div('id-button-mute class-button||onclick="toggle_or_set_mute();"', 'Mute')), 15
+			//w3_div('w3-hcenter', w3_div('id-button-test class-button||onclick="toggle_or_set_test();"', 'Test')), 15
 		) +
-      w3_col_percent('id-squelch w3-vcenter w3-hide', 'class-slider',
+      w3_col_percent('id-squelch w3-valign w3-hide/class-slider',
          //'<span id="id-squelch-label">Squelch </span>', 18,
 			w3_text('id-squelch-label', 'Squelch'), 20,
          '<input id="id-squelch-value" type="range" min="0" max="99" value="'+ squelch +'" step="1" onchange="setsquelch(1,this.value)" oninput="setsquelch(1, this.value)">', 50,
-         w3_divs('id-squelch-field class-slider', ''), 30
-	   );
-		/*
-		) +
-		w3_col_percent('w3-vcenter w3-margin-T-5 w3-margin-B-5', 'class-slider',
-		   w3_div('', 'Audio'), 20,
-		   w3_button('id-button-buffering class-button', 'Less buffering', 'toggle_or_set_audio'), 40,
-		   w3_button('id-button-compression class-button', 'Compression', 'toggle_or_set_compression'), 40
-		);
-		*/
-	w3_el('id-button-mute').style.color = muted? 'lime':'white';
-   toggle_or_set_audio(toggle_e.FROM_COOKIE | toggle_e.SET, 1);
+         w3_div('id-squelch-field class-slider'), 30
+	   ) +
+      w3_col_percent('id-pan w3-valign w3-hide/class-slider',
+         w3_text(optbar_prefix_color, 'Pan'), 20,
+         '<input id="id-pan-value" type="range" min="-1" max="1" value="'+ pan +'" step="0.01" onchange="setpan(1,this.value)" oninput="setpan(0, this.value)">', 50,
+         w3_div('id-pan-field'), 15
+      );
+
+   w3_color('id-button-mute', muted? 'lime':'white');
+   toggle_or_set_test(0);
+   //toggle_or_set_audio(toggle_e.FROM_COOKIE | toggle_e.SET, 1);
    toggle_or_set_compression(toggle_e.FROM_COOKIE | toggle_e.SET, 1);
 	nb_setup(toggle_e.FROM_COOKIE | toggle_e.SET);
 	toggle_or_set_nb(toggle_e.FROM_COOKIE | toggle_e.SET, 0);
-	squelch_setup();
+	squelch_setup(toggle_e.FROM_COOKIE);
+
+   audio_panner_ui_init();
 
 
    // agc
 	w3_el('id-optbar-agc').innerHTML =
-		w3_col_percent('w3-vcenter', 'class-slider',
+		w3_col_percent('w3-valign/class-slider',
 			'<div id="id-button-agc" class="class-button" onclick="toggle_agc(event)" onmousedown="cancelEvent(event)" onmouseover="agc_over(event)">AGC</div>', 13,
 			'<div id="id-button-hang" class="class-button" onclick="toggle_or_set_hang();">Hang</div>', 17,
-			w3_divs('w3-show-inline-block', 'id-label-man-gain cl-closer-spaced-label-text', 'Manual<br>gain'), 15,
+			w3_divs('w3-show-inline-block/id-label-man-gain cl-closer-spaced-label-text', 'Manual<br>gain'), 15,
 			'<input id="input-man-gain" type="range" min="0" max="120" value="'+ manGain +'" step="1" onchange="setManGain(1,this.value)" oninput="setManGain(0,this.value)">', 40,
-			w3_divs('field-man-gain w3-show-inline-block', '', manGain.toString()) +' dB', 15
+			w3_div('field-man-gain w3-show-inline-block', manGain.toString()) +' dB', 15
 		) +
-		w3_divs('', '',
-			w3_col_percent('w3-vcenter', 'class-slider',
-				w3_divs('label-threshold w3-show-inline-block', '', 'Threshold'), 18,
+		w3_div('',
+			w3_col_percent('w3-valign/class-slider',
+				w3_div('label-threshold w3-show-inline-block', 'Threshold'), 18,
 				'<input id="input-threshold" type="range" min="-130" max="0" value="'+ thresh +'" step="1" onchange="setThresh(1,this.value)" oninput="setThresh(0,this.value)">', 52,
-				w3_divs('field-threshold w3-show-inline-block', '', thresh.toString()) +' dB', 30
+				w3_div('field-threshold w3-show-inline-block', thresh.toString()) +' dB', 30
 			),
-			w3_col_percent('w3-vcenter', 'class-slider',
-				w3_divs('label-slope w3-show-inline-block', '', 'Slope'), 18,
+			w3_col_percent('w3-valign/class-slider',
+				w3_div('label-slope w3-show-inline-block', 'Slope'), 18,
 				'<input id="input-slope" type="range" min="0" max="10" value="'+ slope +'" step="1" onchange="setSlope(1,this.value)" oninput="setSlope(0,this.value)">', 52,
-				w3_divs('field-slope w3-show-inline-block', '', slope.toString()) +' dB', 30
+				w3_div('field-slope w3-show-inline-block', slope.toString()) +' dB', 30
 			),
-			w3_col_percent('w3-vcenter', 'class-slider',
-				w3_divs('label-decay w3-show-inline-block', '', 'Decay'), 18,
+			w3_col_percent('w3-valign/class-slider',
+				w3_div('label-decay w3-show-inline-block', 'Decay'), 18,
 				'<input id="input-decay" type="range" min="20" max="5000" value="'+ decay +'" step="1" onchange="setDecay(1,this.value)" oninput="setDecay(0,this.value)">', 52,
-				w3_divs('field-decay w3-show-inline-block', '', decay.toString()) +' mS', 30
+				w3_div('field-decay w3-show-inline-block', decay.toString()) +' msec', 30
 			)
 		);
 	setup_agc(toggle_e.FROM_COOKIE | toggle_e.SET);
@@ -5343,11 +6685,11 @@ function panels_setup()
 	
 	// optbar_setup
 	//console.log('optbar_setup');
-   w3_click_nav(kiwi_toggle(toggle_e.FROM_COOKIE | toggle_e.SET, 'optbar-wf', 'optbar-wf', 'last_optbar'), 'optbar');
+   w3_click_nav(kiwi_toggle(toggle_e.FROM_COOKIE | toggle_e.SET, 'optbar-wf', 'optbar-wf', 'last_optbar'), 'optbar', 'init');
 	
 
 	//jksx XDLS pref button
-	if (dbgUs) w3_el('id-button-pref').style.visibility = 'visible';
+	//if (dbgUs) w3_el('id-button-pref').style.visibility = 'visible';
 	//if (dbgUs) toggle_or_set_pref(toggle_e.SET, 1);
 
 	// id-news
@@ -5380,42 +6722,28 @@ function panels_setup()
 
 	w3_el("id-readme-inner").innerHTML =
 		'<span style="font-size: 15pt; font-weight: bold;">Welcome!</span>' +
-		'&nbsp;&nbsp;&nbsp;Project website: <a href="http://kiwisdr.com" target="_blank">kiwisdr.com</a>&nbsp;&nbsp;&nbsp;&nbsp;Here are some tips: \
-		<ul style="padding-left: 12px;"> \
-		<li> Please <a href="javascript:sendmail(\'pvsslqwChjtjpgq-`ln\');">email us</a> \
-			if your browser is having problems with the SDR. </li>\
-		<li> Windows: Firefox, Chrome & Edge work; IE does not work. </li>\
-		<li> Mac & Linux: Safari, Firefox, Chrome & Opera should work fine. </li>\
-		<li> Open and close the panels by using the circled arrows at the top right corner. </li>\
-		<li> You can click and/or drag almost anywhere on the page to change settings. </li>\
-		<li> Enter a numeric frequency in the box marked "kHz" at right. </li>\
-		<li> Or use the "select band" menu to jump to a pre-defined band. </li>\
-		<li> Use the zoom icons to control the waterfall span. </li>\
-		<li> Tune by clicking on the waterfall, spectrum or the cyan/red-colored station labels. </li>\
-		<li> Ctrl-shift or alt-shift click in the waterfall to lookup frequency in online databases. </li>\
-		<li> Control or option/alt click to page spectrum down and up in frequency. </li>\
-		<li> Adjust the "WF min" slider for best waterfall colors. </li>\
-		<li> See the <a href="http://www.kiwisdr.com/quickstart/" target="_blank">Operating information</a> page\
-		     and <a href="https://www.dropbox.com/s/i1bjyp1acghnc16/KiwiSDR.design.review.pdf?dl=1" target="_blank">Design review document</a>. </li>\
-		</ul> \
-		';
-
-		//<li> Noise across the band due to combination of active antenna and noisy location. </li>\
-		//<li> Noise floor is high due to the construction method of the prototype ... </li>\
-		//<li> ... so if you don\'t hear much on shortwave try \
-		//	<a href="javascript:ext_tune(346,\'am\');">LF</a>, <a href="javascript:ext_tune(15.25,\'lsb\');">VLF</a> or \
-		//	<a href="javascript:ext_tune(1107,\'am\');">MW</a>. </li>\
-
-		//<li> You must use a modern browser that supports HTML5. Partially working on iPad. </li>\
-		//<li> Acknowledging the pioneering web-based SDR work of Pieter-Tjerk de Bohr, PA3FWM author of \
-		//	<a href="http://websdr.ewi.utwente.nl:8901/" target="_blank">WebSDR</a>, and \
-		//	Andrew Holme\'s <a href="http://www.aholme.co.uk/GPS/Main.htm" target="_blank"> homemade GPS receiver</a>. </li> \
+		'&nbsp;&nbsp;&nbsp;Project website: <a href="http://kiwisdr.com" target="_blank">kiwisdr.com</a>&nbsp;&nbsp;&nbsp;&nbsp;Here are some tips:' +
+		'<ul style="padding-left: 12px;">' +
+		'<li> Windows: Firefox, Chrome & Edge work; IE does not work. </li>' +
+		'<li> Mac & Linux: Safari, Firefox, Chrome & Opera should work fine. </li>' +
+		'<li> Open and close the panels by using the circled arrows at the top right corner. </li>' +
+		'<li> You can click and/or drag almost anywhere on the page to change settings. </li>' +
+		'<li> Enter a numeric frequency in the box marked "kHz" at right. </li>' +
+		'<li> Or use the "select band" menu to jump to a pre-defined band. </li>' +
+		'<li> Use the zoom icons to control the waterfall span. </li>' +
+		'<li> Tune by clicking on the waterfall, spectrum or the cyan/red-colored station labels. </li>' +
+		'<li> Ctrl-shift or alt-shift click in the waterfall to lookup frequency in online databases. </li>' +
+		'<li> Control or option/alt click to page spectrum down and up in frequency. </li>' +
+		'<li> Adjust the "WF min" slider for best waterfall colors. </li>' +
+		'<li> See the <a href="http://www.kiwisdr.com/quickstart/" target="_blank">Operating information</a> page' +
+		     'and <a href="https://www.dropbox.com/s/i1bjyp1acghnc16/KiwiSDR.design.review.pdf?dl=1" target="_blank">Design review document</a>. </li>' +
+		'</ul>';
 
 
 	// id-msgs
 	
 	var contact_admin = ext_get_cfg_param('contact_admin');
-	if (typeof contact_admin == 'undefined') {
+	if (isUndefined(contact_admin)) {
 		// hasn't existed before: default to true
 		//console.log('contact_admin: INIT true');
 		contact_admin = true;
@@ -5430,41 +6758,27 @@ function panels_setup()
 	if (admin_email != null) admin_email = encodeURIComponent(encodeURIComponent(enc(admin_email)));
 
    w3_el('id-optbar-status').innerHTML =
-		w3_div('',
-		   'Contacts: ' +
-		   (admin_email? '<a href="javascript:sendmail(\''+ admin_email +'\');">Owner/Admin</a>, ' : '') +
-		   '<a href="javascript:sendmail(\'pvsslqwChjtjpgq-`ln\');">KiwiSDR</a> ' +
-		   '| <a href="https://kiwiirc.com/client/chat.freenode.net/#kiwisdr" target="_blank">Chat</a> '
-		) +
 		w3_div('id-status-msg') +
+		w3_div('',
+	      w3_text(optbar_prefix_color, 'Links'),
+	      w3_text('',
+            (admin_email? '<a href="javascript:sendmail(\''+ admin_email +'\');">Owner/Admin</a> | ' : '') +
+            '<a href="http://kiwisdr.com" target="_blank">KiwiSDR</a> ' +
+            '| <a href="http://valentfx.com/vanilla/discussions" target="_blank">Forum</a> ' +
+            '| <a href="https://kiwiirc.com/client/chat.freenode.net/#kiwisdr" target="_blank">Chat</a> '
+         )
+		) +
 		w3_div('id-status-adc') +
 		w3_div('id-status-config') +
 		w3_div('id-status-gps') +
-		w3_div('',
-		   w3_div('id-status-audio w3-show-inline'), ' ',
-		   w3_div('id-status-problems w3-show-inline')
+		w3_inline('w3-valign',
+		   w3_div('id-status-audio'), ' ',
+		   w3_div('id-status-problems')
 		) +
 		w3_div('id-status-stats-cpu') +
 		w3_div('id-status-stats-xfer');
 
 	setTimeout(function() { setInterval(status_periodic, 5000); }, 1000);
-
-   /*
-	w3_el_softfail("id-msgs-inner").innerHTML =
-		w3_div('w3-margin-B-5',
-		   '<strong> Contacts: </strong>' +
-		   (admin_email? '<a href="javascript:sendmail(\''+ admin_email +'\');"><strong>Owner/Admin</strong></a>, ' : '') +
-		   '<a href="javascript:sendmail(\'pvsslqwChjtjpgq-`ln\');"><strong>KiwiSDR</strong></a>, ' +
-		   '<a href="javascript:sendmail(\'kb4jonCpgq-kv\');"><strong>OpenWebRX</strong></a> ' +
-		   '| <a href="https://kiwiirc.com/client/chat.freenode.net/#kiwisdr" target="_blank"><strong>Chat</strong></a> ' +
-		   w3_div('id-problems w3-show-inline')
-		) +
-		w3_div('id-msg-status') +
-		w3_div('id-msg-config') +
-		w3_div('id-msg-gps') +
-		w3_div('id-msg-audio') +
-		w3_div('id-debugdiv');
-	*/
 }
 
 
@@ -5472,13 +6786,15 @@ function panels_setup()
 // option bar
 ////////////////////////////////
 
-function optbar_focus(id)
+var prev_optbar = null;
+
+function optbar_focus(next_id, cb_arg)
 {
-   //console.log('optbar_focus='+ id);
-   writeCookie('last_optbar', id);
+   writeCookie('last_optbar', next_id);
    
    var h;
-   if (id == 'optbar-off') {
+   if (next_id == 'optbar-off') {
+      if (cb_arg != 'init' && prev_optbar == 'optbar-off') toggle_or_set_hide_topbar();
       w3_hide('id-optbar-content');
       h = px(CONTROL_HEIGHT);
    } else {
@@ -5486,12 +6802,13 @@ function optbar_focus(id)
       h = px(CONTROL_HEIGHT + OPTBAR_HEIGHT + OPTBAR_TMARGIN);
    }
    w3_el('id-control').style.height = h;
+   prev_optbar = next_id;
    freqset_select();
 }
 
-function optbar_blur(id)
+function optbar_blur(cur_id)
 {
-   //console.log('optbar_blur='+ id);
+   //console.log('optbar_blur='+ cur_id);
 }
 
 
@@ -5503,7 +6820,7 @@ function zoomCorrection()
 
 
 ////////////////////////////////
-// waterfall
+// waterfall / spectrum controls
 ////////////////////////////////
 
 var WF_SPEED_OFF = 0;
@@ -5525,25 +6842,154 @@ var wf_contr_s = { 0:'normal', 1:'scheme 1', 2:'scheme 2', 3:'scheme 3', 4:'sche
 function wf_contr_cb(path, idx, first)
 {
    console.log('wf_contr_cb idx='+ idx +' first='+ first);
-   colormap_sqrt = idx;
-   freqset_select();
 }
 
-var spec_filter_s = { 0:'spec slow', 1:'spec med', 2:'spec fast' };
-var spec_nonlin_time_constants = [ -0.2, -0.5, -1.0 ];
-var spec_nonlin_time_constant = -0.2;
+var wf_gnd = 0, wf_gnd_value_base = 150, wf_gnd_value = wf_gnd_value_base;
 
-function spec_filter_cb(path, idx, first)
+function wf_gnd_cb(path, idx, first)
 {
-   console.log('spec_filter_cb idx='+ idx +' first='+ first);
-   spec_nonlin_time_constant = spec_nonlin_time_constants[idx];
-   freqset_select();
+   //console.log('wf_gnd_cb idx='+ idx +' first='+ first);
+   wf_gnd = !idx;
+   if (idx == 0) freqset_select();
 }
 
-var wf_cmap_s = { 0:'default', 1:'CuteSDR', 2:'greyscale', 3:'user 1' };
+
+var wf_sp_param = 0;
+var wf_param = 0, sp_param = 0;
+var wf_sp_which = 0;   // 0 = spectrum, 1 = waterfall
+var wf_filter = 0, spec_filter = 0;
+var wf_sp_menu_s = [ 'IIR', 'MMA', 'EMA', 'off' ];
+var wf_sp_menu_e = { IIR:0, MMA:1, EMA:2, OFF:3 };
+var wf_sp_slider_s = [ 'gain', 'avgs', 'avgs', '' ];
+
+var wf_sp_filter_p = [
+   {  // spectrum
+      IIR_min:0, IIR_max:1, IIR_step:0.1, IIR_def:0.2, IIR_val:undefined,
+      MMA_min:1, MMA_max:32, MMA_step:1, MMA_def:8, MMA_val:undefined,
+      EMA_min:1, EMA_max:32, EMA_step:1, EMA_def:8, EMA_val:undefined,
+      off_min:0, off_max:0, off_step:0, off_def:0, off_val:undefined
+   },
+   {  // waterfall
+      IIR_min:0, IIR_max:2, IIR_step:0.1, IIR_def:0.8, IIR_val:undefined,
+      MMA_min:1, MMA_max:16, MMA_step:1, MMA_def:2, MMA_val:undefined,
+      EMA_min:1, EMA_max:16, EMA_step:1, EMA_def:2, EMA_val:undefined,
+      off_min:0, off_max:0, off_step:0, off_def:0, off_val:undefined
+   }
+];
+
+function spec_show()
+{
+   toggle_or_set_spec(toggle_e.SET, 1);
+   
+   var sp = -1;
+   spectrum_param = parseFloat(spectrum_param);
+   if (!isNaN(spectrum_param) && spectrum_param != -1) sp = spectrum_param;
+   
+   wf_sp_which = 0;
+   var f = wf_sp_menu_s[spec_filter];
+   var f_p = wf_sp_filter_p[0];
+   
+   if (sp >= f_p[f+'_min'] && sp <= f_p[f+'_max']) {
+      //console.log('spec_show sp='+ sp);
+      wf_sp_slider_cb('id-wf-sp-slider', sp, /* done */ true, /* first */ false);
+      toggle_or_set_wf_sp_button(toggle_e.SET, 0);
+   }
+}
+
+function wf_sp_menu_cb(path, idx, first, param)    // param indicated which menu, wf or sp
+{
+   idx = +idx;
+   //console.log('wf_sp_menu_cb ENTER path='+ path +' idx='+ idx +' first='+ first +' which='+ param);
+   //kiwi_trace('wf_sp_menu_cb');
+   wf_sp_which = +param;
+   if (wf_sp_which) wf_filter = idx; else spec_filter = idx;
+
+   var f_val = wf_sp_which? wf_filter : spec_filter;
+   var f = wf_sp_menu_s[f_val];
+   var f_p = wf_sp_filter_p[wf_sp_which];
+   var val = f_p[f+'_val'];
+   //console.log('wf_sp_menu_cb which='+ wf_sp_which +' f_val='+ f_val +' f_p='+ f_p +' val='+ val);
+   
+   // update button and slider to match which menu was changed
+   wf_sp_slider_cb('id-wf-sp-slider', val, /* done */ true, /* first */ false);
+   toggle_or_set_wf_sp_button(toggle_e.SET, wf_sp_which);
+	writeCookie(wf_sp_which? 'last_wf_filter':'last_spec_filter', f_val.toString());
+
+	if (wf_sp_which) need_clear_wfavg = true; else need_clear_specavg = true;
+   freqset_select();
+   //console.log('wf_sp_menu_cb EXIT path='+ path +' wf_filter='+ wf_filter +' wf_param='+ wf_param +' spec_filter='+ spec_filter +' sp_param='+ sp_param);
+}
+
+function spectrum_filter(filter)
+{
+   wf_sp_menu_cb('', filter, false, 0);
+}
+
+function toggle_or_set_wf_sp_button(set, val)
+{
+   //console.log('toggle_or_set_wf_sp_button ENTER set='+ set +' val='+ val);
+   //kiwi_trace('toggle_or_set_wf_sp_button');
+	if (isNumber(set))
+		wf_sp_which = +kiwi_toggle(set, +val, +val, 'last_wf_sp_filter');
+	else
+		wf_sp_which ^= 1;
+
+   //console.log('toggle_or_set_wf_sp_button new which='+ wf_sp_which);
+	w3_innerHTML('id-wf-sp-button', wf_sp_which? 'WF &Delta;':'Spec &Delta;');
+
+   // update slider 
+   var f_val = wf_sp_which? wf_filter : spec_filter;
+   var f = wf_sp_menu_s[f_val];
+   var f_p = wf_sp_filter_p[wf_sp_which];
+   wf_sp_slider_cb('id-wf-sp-slider', f_p[f+'_val'], /* done */ true, /* first */ false);
+	freqset_select();
+   //console.log('toggle_or_set_wf_sp_button EXIT');
+}
+
+function wf_sp_slider_cb(path, val, done, first)
+{
+   if (first) return;
+   val = +val;
+   //console.log('wf_sp_slider_cb ENTER path='+ path +' val='+ val +' which='+ wf_sp_which);
+   //kiwi_trace('wf_sp_slider_cb');
+	var f_val = wf_sp_which? wf_filter : spec_filter;
+   var f = wf_sp_menu_s[f_val];
+   var f_p = wf_sp_filter_p[wf_sp_which];
+
+   if (val == undefined || isNaN(val)) {
+      val = f_p[f+'_def'];
+      //console.log('wf_sp_slider_cb using default='+ val +'('+ typeof(val) +') which='+ wf_sp_which);
+      var lsf = parseFloat(readCookie(wf_sp_which? 'last_wf_filter':'last_spec_filter'));
+      var lsfp = parseFloat(readCookie(wf_sp_which? 'last_wf_filter_param':'last_spec_filter_param'));
+      if (lsf == f_val && !isNaN(lsfp)) {
+         //console.log('wf_sp_slider_cb USING READ_COOKIE last_filter_param='+ lsfp);
+         val = lsfp;
+      }
+   }
+
+   if (wf_sp_which) wf_param = val; else sp_param = val;
+	//console.log('wf_sp_slider_cb UPDATE slider='+ val +' which='+ wf_sp_which +' menu='+ f_val +' done='+ done +' first='+ first);
+	f_p[f+'_val'] = val;
+
+   // for benefit of direct callers
+   w3_slider_setup('id-wf-sp-slider', f_p[f+'_min'], f_p[f+'_max'], f_p[f+'_step'], val);
+   w3_el('id-wf-sp-slider-field').innerHTML = (f_val == wf_sp_menu_e.OFF)? '' : (val +' '+ wf_sp_slider_s[f_val]);
+
+   if (done) {
+	   //console.log('wf_sp_slider_cb DONE WRITE_COOKIE last_filter_param='+ val.toFixed(2) +' which='+ wf_sp_which);
+	   writeCookie(wf_sp_which? 'last_wf_filter_param':'last_spec_filter_param', val.toFixed(2));
+      freqset_select();
+   }
+
+   //console.log('wf_sp_slider_cb EXIT path='+ path);
+}
+
+
+var wf_cmap_s = [ 'default', 'CuteSDR', 'greyscale', 'user 1' ];
 
 function wf_cmap_cb(path, idx, first)
 {
+   if (first) return;
    var idx_map = [ 1, 0, 2, 3 ];
    idx = +idx;
    if (idx < 0 || idx >= idx_map.length) idx = 0;
@@ -5556,12 +7002,18 @@ function wf_cmap_cb(path, idx, first)
 
 function setwfspeed(done, str)
 {
+   if (audioFFT_active) {
+      freqset_select();
+      return;
+   }
+   
 	wf_speed = +str;
+	//console.log('setwfspeed '+ wf_speed +' done='+ done);
 	w3_set_value('slider-rate', wf_speed)
    w3_el('slider-rate-field').innerHTML = wf_speeds[wf_speed];
    w3_el('slider-rate-field').style.color = wf_speed? 'white':'orange';
    wf_send('SET wf_speed='+ wf_speed.toFixed(0));
-   freqset_select();
+   if (done) freqset_select();
 }
 
 function setmaxdb(done, str)
@@ -5569,32 +7021,43 @@ function setmaxdb(done, str)
 	var strdb = parseFloat(str);
 	if (strdb <= mindb) {
 		maxdb = mindb + 1;
-		html('input-maxdb').value = maxdb;
-		html('field-maxdb').innerHTML = maxdb.toFixed(0) + ' dB';
-		html('field-maxdb').style.color = "red"; 
+		html('id-input-maxdb').value = maxdb;
+		html('id-field-maxdb').innerHTML = maxdb.toFixed(0) + ' dB';
+		html('id-field-maxdb').style.color = "red"; 
 	} else {
 		maxdb = strdb;
-		html('field-maxdb').innerHTML = strdb.toFixed(0) + ' dB';
-		html('field-maxdb').style.color = "white"; 
-		html('field-mindb').style.color = "white";
+		html('id-field-maxdb').innerHTML = strdb.toFixed(0) + ' dB';
+		html('id-field-maxdb').style.color = "white"; 
+		html('id-field-mindb').style.color = "white";
 	}
 	
 	setmaxmindb(done);
 }
 
+function incr_mindb(done, incr)
+{
+   var incrdb = (+mindb) + incr;
+   var val = Math.max(-190, Math.min(-30, incrdb));
+   //console.log('incr_mindb mindb='+ mindb +' incrdb='+ incrdb +' val='+ val);
+   setmindb(done, val.toFixed(0));
+}
+
 function setmindb(done, str)
 {
 	var strdb = parseFloat(str);
+   //console.log('setmindb strdb='+ strdb +' maxdb='+ maxdb +' mindb='+ mindb +' done='+ done);
 	if (maxdb <= strdb) {
 		mindb = maxdb - 1;
-		html('input-mindb').value = mindb;
-		html('field-mindb').innerHTML = mindb.toFixed(0) + ' dB';
-		html('field-mindb').style.color = "red";
+		html('id-input-mindb').value = mindb;
+		html('id-field-mindb').innerHTML = mindb.toFixed(0) + ' dB';
+		html('id-field-mindb').style.color = "red";
 	} else {
 		mindb = strdb;
-		html('field-mindb').innerHTML = strdb.toFixed(0) + ' dB';
-		html('field-mindb').style.color = "white";
-		html('field-maxdb').style.color = "white";
+      //console.log('setmindb SET strdb='+ strdb +' maxdb='+ maxdb +' mindb='+ mindb +' done='+ done);
+		html('id-input-mindb').value = mindb;
+		html('id-field-mindb').innerHTML = strdb.toFixed(0) + ' dB';
+		html('id-field-mindb').style.color = "white";
+		html('id-field-maxdb').style.color = "white";
 	}
 
 	mindb_un = mindb + zoomCorrection();
@@ -5607,11 +7070,11 @@ function setmaxmindb(done)
 	full_scale = full_scale? full_scale : 1;	// can't be zero
 	spectrum_dB_bands();
    wf_send("SET maxdb="+maxdb.toFixed(0)+" mindb="+mindb.toFixed(0));
-	need_clear_specavg = true;
+	need_clear_wf_sp_avg = true;
    if (done) {
    	freqset_select();
-   	writeCookie('last_max_dB', maxdb.toFixed(0));
-   	writeCookie('last_min_dB', mindb_un.toFixed(0));	// need to save the uncorrected (z0) value
+   	writeCookie(audioFFT_active? 'last_AF_max_dB' : 'last_max_dB', maxdb.toFixed(0));
+   	writeCookie(audioFFT_active? 'last_AF_min_dB' : 'last_min_dB', mindb_un.toFixed(0));	// need to save the uncorrected (z0) value
 	}
 }
 
@@ -5622,11 +7085,11 @@ function update_maxmindb_sliders()
 	full_scale = full_scale? full_scale : 1;	// can't be zero
 	spectrum_dB_bands();
 	
-   html('input-maxdb').value = maxdb;
-   html('field-maxdb').innerHTML = maxdb.toFixed(0) + ' dB';
+   html('id-input-maxdb').value = maxdb;
+   html('id-field-maxdb').innerHTML = maxdb.toFixed(0) + ' dB';
 	
-   html('input-mindb').value = mindb;
-   html('field-mindb').innerHTML = mindb.toFixed(0) + ' dB';
+   html('id-input-mindb').value = mindb;
+   html('id-field-mindb').innerHTML = mindb.toFixed(0) + ' dB';
 }
 
 var need_wf_autoscale = false;
@@ -5644,7 +7107,7 @@ var spectrum_slow_dev = 0;
 
 function toggle_or_set_slow_dev(set, val)
 {
-	if (typeof set == 'number')
+	if (isNumber(set))
 		spectrum_slow_dev = kiwi_toggle(set, val, spectrum_slow_dev, 'last_slow_dev');
 	else
 		spectrum_slow_dev ^= 1;
@@ -5655,39 +7118,215 @@ function toggle_or_set_slow_dev(set, val)
 	   setwfspeed(1, WF_SPEED_MED);
 }
 
+var spectrum_peak = 0;
+var spectrum_peak_clear = false;
+
+function toggle_or_set_spec_peak(set, val)
+{
+	if (isNumber(set))
+		spectrum_peak = kiwi_toggle(set, val, spectrum_peak, 'last_spec_peak');
+	else
+		spectrum_peak ^= 1;
+	if (spectrum_peak) spectrum_peak_clear = true;
+	w3_color('id-button-spec-peak', spectrum_peak? 'lime':'white');
+	freqset_select();
+	writeCookie('last_spec_peak', spectrum_peak.toString());
+}
+
 
 ////////////////////////////////
 // audio
 ////////////////////////////////
 
+var muted_until_freq_set = true;
+var muted = false;
+var volume = 50;
+var f_volume = 0;
+var recording = false;
+
 function setvolume(done, str)
 {
-   volume = parseFloat(str);
+   volume = +str;
+   volume = Math.max(0, Math.min(200, volume));
    f_volume = muted? 0 : volume/100;
-   if (done) freqset_select();
+   if (done) {
+      w3_set_value('id-input-volume', volume);
+      freqset_select();
+   }
 }
 
-function toggle_mute()
+function toggle_or_set_mute(set)
 {
-	muted ^= 1;
-	if (muted) {
-	   w3_hide('id-mute-no');
-	   w3_show('id-mute-yes');
-	} else {
-	   w3_hide('id-mute-yes');
-	   w3_show('id-mute-no');
-	}
-	var el = w3_el('id-button-mute');
-	if (el) el.style.color = muted? 'lime':'white';
+	if (isNumber(set))
+      muted = set;
+   else
+	   muted ^= 1;
+   //console.log('toggle_or_set_mute set='+ set +' muted='+ muted);
+   w3_show_hide('id-mute-no', !muted);
+   w3_show_hide('id-mute-yes', muted);
+   w3_color('id-button-mute', muted? 'lime':'white');
    f_volume = muted? 0 : volume/100;
    freqset_select();
 }
 
+var de_emphasis = 0;
+var de_emphasis_s = [ 'off', '75us', '50us' ];
+
+function de_emp_cb(path, idx, first)
+{
+   de_emphasis = +idx;
+	snd_send('SET de_emp='+ de_emphasis);
+   writeCookie('last_de_emphasis', de_emphasis.toString());
+}
+
+var pan = 0;
+
+function setpan(done, str)
+{
+   var pan = +str;
+   //console.log('pan='+ pan.toFixed(1));
+   if (pan > -0.1 && pan < +0.1) pan = 0;
+   w3_set_value('id-pan-value', pan);
+   w3_innerHTML('id-pan-field', pan? ((Math.abs(pan)*100).toFixed(0) +' '+ ((pan < 0)? 'L':'R')) : 'L=R');
+   audio_set_pan(pan);
+   if (done) {
+      writeCookie('last_pan', pan.toString());
+      freqset_select();
+   }
+}
+
+// called from both audio_init() and panels_setup() since there is a race setting audio_panner
+function audio_panner_ui_init()
+{
+   if (audio_panner) {
+      w3_show_block('id-pan');
+      setpan(1, pan);
+   }
+}
+
+var hide_topbar = 0;
+function toggle_or_set_hide_topbar(set)
+{
+	if (isNumber(set))
+      hide_topbar = set;
+   else {
+	   hide_topbar = (hide_topbar + 1) & 3;
+	   
+	   // there is no top container to hide if data container or spectrum in use
+      if ((hide_topbar & 1) && (extint.using_data_container || spectrum_display))
+	      hide_topbar = (hide_topbar + 1) & 3;
+	}
+   //console.log('toggle_or_set_hide_topbar set='+ set +' hide_topbar='+ hide_topbar);
+   w3_set_props('id-top-container', 'w3-panel-override-hide', hide_topbar & 1);
+   w3_set_props('id-band-container', 'w3-panel-override-hide', hide_topbar & 2);
+   openwebrx_resize();
+}
+
+var hide_panels = 0;
+function toggle_or_set_hide_panels(set)
+{
+	if (isNumber(set))
+      hide_panels = set;
+   else
+	   hide_panels ^= 1;
+   //console.log('toggle_or_set_hide_panels set='+ set +' hide_panels='+ hide_panels);
+   w3_iterate_children('id-panels-container', function(el) {
+      if (w3_contains(el, 'class-panel')) {
+         w3_set_props(el, 'w3-panel-override-hide', hide_panels);
+      }
+   });
+}
+
+var test_button;
+function toggle_or_set_test(set)
+{
+	if (isNumber(set))
+      test_button = set;
+   else
+	   test_button ^= 1;
+   console.log('toggle_or_set_test set='+ set +' test_button='+ test_button);
+   w3_color('id-button-test', test_button? 'lime':'white');
+	snd_send('SET test='+ (test_button? 1:0));
+   freqset_select();
+}
+
+function toggle_or_set_rec(set)
+{
+   recording = !recording;
+   //console.log('toggle_or_set_rec set=' + set + ' recording=' + recording);
+   var el1 = w3_el('id-rec1');
+   var el2 = w3_el('id-rec2');
+   if (recording) {
+      w3_remove_then_add(el1, 'fa-circle', 'fa-circle-o-notch fa-spin');
+      w3_remove(el2, 'w3-hide');
+   } else {
+      w3_remove_then_add(el1, 'fa-circle-o-notch fa-spin', 'fa-circle');
+      w3_add(el2, 'w3-hide');
+   }
+   if (recording) {
+      // Start recording. This is a 'window' property, so audio_recv(), where the
+      // recording hooks are, can access it.
+      window.recording_meta = {
+         buffers: [],         // An array of ArrayBuffers with audio samples to concatenate
+         data: null,          // DataView for the current buffer
+         offset: 0,           // Current offset within the current ArrayBuffer
+         total_size: 0,       // Total size of all recorded data in bytes
+         filename: window.location.hostname + '_' + new Date().toISOString().replace(/:/g, '_').replace(/\.[0-9]+Z$/, 'Z') + '_' + w3_el('id-freq-input').value + '_' + cur_mode + '.wav'
+      };
+      window.recording_meta.buffers.push(new ArrayBuffer(65536));
+      window.recording_meta.data = new DataView(window.recording_meta.buffers[0]);
+   } else {
+      // Stop recording. Build a WAV file.
+      var wav_header = new ArrayBuffer(44);
+      var wav_data = new DataView(wav_header);
+      wav_data.setUint32(0, 0x52494646);                                  // ASCII "RIFF"
+      wav_data.setUint32(4, window.recording_meta.total_size + 36, true); // Little-endian size of the remainder of the file, excluding this field
+      wav_data.setUint32(8, 0x57415645);                                  // ASCII "WAVE"
+      wav_data.setUint32(12, 0x666d7420);                                 // ASCII "fmt "
+      wav_data.setUint32(16, 16, true);                                   // Length of this section ("fmt ") in bytes
+      wav_data.setUint16(20, 1, true);                                    // PCM coding
+      var nch = (cur_mode === 'iq' || cur_mode === 'drm')? 2 : 1;         // Two channels for IQ mode, one channel otherwise
+      wav_data.setUint16(22, nch, true);
+      var srate = Math.round(audio_input_rate || 12000);
+      wav_data.setUint32(24, srate, true);                                // Sample rate
+      var bpsa = 16;                                                      // Bits per sample
+      var Bpsa = bpsa/8;                                                  // Bytes per sample
+      wav_data.setUint32(28, srate*nch*Bpsa, true);                       // Byte rate
+      wav_data.setUint16(32, nch*Bpsa, true);                             // Block align
+      wav_data.setUint16(34, bpsa, true);                                 // Bits per sample
+      wav_data.setUint32(36, 0x64617461);                                 // ASCII "data"
+      wav_data.setUint32(40, window.recording_meta.total_size, true);     // Little-endian size of all recorded samples in bytes
+      window.recording_meta.buffers.unshift(wav_header);                  // Prepend the WAV header to the recorded audio
+      var wav_file = new Blob(window.recording_meta.buffers, { type: 'octet/stream' });
+
+      // Download the WAV file.
+      var a = document.createElement('a');
+      a.style = 'display: none';
+      a.href = window.URL.createObjectURL(wav_file);
+      a.download = window.recording_meta.filename;
+      document.body.appendChild(a); // https://bugzilla.mozilla.org/show_bug.cgi?id=1218456
+      a.click();
+      window.URL.revokeObjectURL(a.href);
+      document.body.removeChild(a);
+
+      delete window.recording_meta;
+   }
+}
+
 // squelch
 var squelch_state = 0;
+var squelch = 0;
 
-function squelch_setup()
+function squelch_setup(flags)
 {
+   if (flags & toggle_e.FROM_COOKIE) { 
+      var sq = readCookie('last_squelch');
+      if (sq != null) {
+         squelch = sq;
+         w3_set_value('id-squelch-value', sq);
+         setsquelch(1, sq);
+      }
+   }
 	if (cur_mode == 'nbfm') {
 		w3_el('id-squelch-label').style.color = squelch_state? 'lime':'white';
 		w3_el('id-squelch-field').innerHTML = squelch;
@@ -5697,13 +7336,14 @@ function squelch_setup()
    }
 }
 
-var squelch = 0;
-
 function setsquelch(done, str)
 {
    squelch = parseFloat(str);
 	w3_el('id-squelch-field').innerHTML = str;
-   if (done) snd_send("SET squelch="+ squelch.toFixed(0) +' max='+ squelch_threshold.toFixed(0));
+   if (done) {
+      snd_send("SET squelch="+ squelch.toFixed(0) +' max='+ squelch_threshold.toFixed(0));
+      writeCookie('last_squelch', str);
+   }
 }
 
 // less buffering and compression buttons
@@ -5711,7 +7351,7 @@ var btn_less_buffering = 0;
 
 function toggle_or_set_audio(set, val)
 {
-	if (typeof set == 'number')
+	if (isNumber(set))
 		btn_less_buffering = kiwi_toggle(set, val, btn_less_buffering, 'last_audio');
 	else
 		btn_less_buffering ^= 1;
@@ -5725,7 +7365,7 @@ function toggle_or_set_audio(set, val)
 	writeCookie('last_audio', btn_less_buffering.toString());
 	
 	// if toggling (i.e. not the first time during setup) reinitialize audio with specified buffering
-	if (typeof set != 'number') {
+	if (!isNumber(set)) {
 	   // haven't got audio_init() calls to work yet (other than initial)
 	   //audio_init(null, btn_less_buffering, btn_compression);
       window.location.reload(true);
@@ -5736,7 +7376,12 @@ var btn_compression = 0;
 
 function toggle_or_set_compression(set, val)
 {
-	if (typeof set == 'number')
+   // Prevent compression setting changes while recording.
+   if (recording) {
+      return;
+   }
+
+	if (isNumber(set))
 		btn_compression = kiwi_toggle(set, val, btn_compression, 'last_compression');
 	else
 		btn_compression ^= 1;
@@ -5809,15 +7454,27 @@ function nb_setup(toggle_flags)
 	noiseThresh = kiwi_toggle(toggle_flags, default_noiseThresh, noiseThresh, 'last_noiseThresh'); setNoiseThresh(true, noiseThresh);
 }
 
-var nb_test = 0;
 
-function toggle_nb_test()
+// LMS filter
+
+function lms_denoise_load_cb(path, checked, first)
 {
-   nb_test ^= 1;
-   var el = w3_el('id-button-nb-test');
-	el.style.color = nb_test? 'lime':'white';
-	freqset_select();
-	nb_send(nb_test? -1 : -2, noiseThresh);
+   if (first) return;
+   kiwi_load_js(['extensions/LMS_filter/LMS_filter.js'],
+      function() {
+         lms_denoise_cb(path, checked, first);
+      }
+   );
+}
+
+function lms_autonotch_load_cb(path, checked, first)
+{
+   if (first) return;
+   kiwi_load_js(['extensions/LMS_filter/LMS_filter.js'],
+      function() {
+         lms_autonotch_cb(path, checked, first);
+      }
+   );
 }
 
 
@@ -5851,7 +7508,7 @@ function agc_over(evt)
 var default_agc = 1;
 var default_hang = 0;
 var default_manGain = 50;
-var default_thresh = -100;
+var default_thresh = -130;
 var default_slope = 6;
 var default_decay = 1000;
 
@@ -5959,11 +7616,12 @@ function users_setup()
 	for (var i=0; i < rx_chans; i++) {
 	   s +=
 	      w3_div('',
-            w3_div('w3-show-inline-block w3-left w3-margin-R-5 '+ optbar_prefix_color, 'RX'+ i),
+            w3_div('w3-show-inline-block w3-left w3-margin-R-5 ' +
+               ((i == rx_chan)? 'w3-text-css-lime' : optbar_prefix_color), 'RX'+ i),
             w3_div('id-optbar-user-'+ i +' w3-show-inline-block')
          );
 	}
-	html('id-optbar-users').innerHTML = w3_div('w3-nowrap w3-scroll', s);
+	html('id-optbar-users').innerHTML = w3_div('w3-nowrap', s);
 }
 
 
@@ -5971,21 +7629,22 @@ function users_setup()
 // control panel
 ////////////////////////////////
 
-// Safari on iOS only plays webaudio after it has been started by clicking a button
+// Safari on iOS only plays webaudio after it has been started by clicking a button.
+// Same now for Chrome and Safari 12 on OS X.
 function play_button()
 {
 	try {
-	   if (kiwi_isChrome()) {
+	   if (kiwi_is_iOS()) {
+         var actx = audio_context;
+         var bufsrc = actx.createBufferSource();
+         bufsrc.connect(actx.destination);
+         try { bufsrc.start(0); } catch(ex) { bufsrc.noteOn(0); }
+	   } else {
 	      try {
 	         if (audio_context) audio_context.resume();
 	      } catch(ex) {
 	         console.log('#### audio_context.resume() FAILED');
 	      }
-	   } else {
-         var actx = audio_context;
-         var bufsrc = actx.createBufferSource();
-         bufsrc.connect(actx.destination);
-         try { bufsrc.start(0); } catch(ex) { bufsrc.noteOn(0); }
       }
    } catch(ex) { add_problem("audio start"); }
 
@@ -6006,18 +7665,18 @@ var spectrum_display = false;
 
 function toggle_or_set_spec(set, val)
 {
-	if (typeof set == 'number' && (set & toggle_e.SET)) {
+	if (isNumber(set) && (set & toggle_e.SET)) {
 		spectrum_display = val;
 	} else {
 		spectrum_display ^= 1;
 	}
 
 	// close the extension first if it's using the data container and the spectrum button is pressed
-	if (extint_using_data_container && spectrum_display) {
+	if (extint.using_data_container && spectrum_display) {
 		extint_panel_hide();
 	}
 
-	html('button-spectrum').style.color = spectrum_display? 'lime':'white';
+	html('id-button-spectrum').style.color = spectrum_display? 'lime':'white';
 	w3_show_hide('id-spectrum-container', spectrum_display);
 	w3_show_hide('id-top-container', !spectrum_display);
    freqset_select();
@@ -6053,11 +7712,21 @@ function setup_band_menu()
 	return s;
 }
 
-function mode_over(evt)
+function mode_over(evt, el)
 {
-	for (m in modes_l) {
-		w3_el('button-'+modes_l[m]).title = evt.shiftKey? 'restore passband':'';
-	}
+   var mode = el.innerHTML.toLowerCase();
+   //console.log('mode_over mode='+ mode);
+   
+   switch (mode) {
+   
+      case 'sam':
+         el.title = 'not yet implemented';
+         break;
+      
+      default:
+         el.title = evt.shiftKey? 'restore passband':'';
+         break;
+   }
 }
 
 function any_alternate_click_event(evt)
@@ -6074,14 +7743,60 @@ function restore_passband(mode)
    //console.log('DEMOD PB reset');
 }
 
-function mode_button(evt, mode)
+var mode_buttons = [
+   { s:[ 'AM', 'AMN' ],          dis:0 },    // fixme: add AMW dynamically if 20 kHz mode? would have to deal with last_mode=ANW cookie
+   { s:[ 'SAM', 'SAU', 'SAL' ],  dis:1 },
+   { s:[ 'DRM' ],                dis:0 },
+   { s:[ 'LSB', 'LSN' ],         dis:0 },
+   { s:[ 'USB', 'USN' ],         dis:0 },
+   { s:[ 'CW', 'CWN' ],          dis:0 },
+   { s:[ 'NBFM' ],               dis:0 },
+   { s:[ 'IQ' ],                 dis:0 },
+];
+
+function mode_button(evt, el)
 {
+   var mode = el.innerHTML.toLowerCase();
+
+	// Prevent going between mono and stereo modes while recording
+	// FIXME: do something better like disable ineligible mode buttons and show reason in mouseover tooltip 
+   var c_iq_drm = (cur_mode == 'iq' || cur_mode == 'drm')? 1:0;
+   var m_iq_drm = (mode == 'iq' || mode == 'drm')? 1:0;
+	if (recording && (c_iq_drm ^ m_iq_drm)) {
+		return;
+	}
+
 	// reset passband to default parameters
 	if (any_alternate_click_event(evt)) {
 	   restore_passband(mode);
+      ext_set_mode(mode, null, { open_ext:true });
+	   return;
 	}
-	
-	demodulator_analog_replace(mode);
+
+	// cycle button to next value
+	//console.log(el);
+   var col = parseInt(el.id);
+
+   if (isUndefined(owrx.last_mode_col)) {
+      owrx.last_mode_col = parseInt(owrx.last_mode_el.id);
+      //console.log('#### mode_button: last_mode_col UNDEF set to '+ owrx.last_mode_col);
+   }
+   
+   if (owrx.last_mode_col != col) {
+      //console.log('#### mode_button: col '+ owrx.last_mode_col +'>'+ col +' '+ mode);
+      owrx.last_mode_col = col;
+   } else {
+      var sa = mode_buttons[col].s;
+      mode = mode.toUpperCase();
+      var i = sa.indexOf(mode);
+      if (i == sa.length-1) i = 0; else i++;
+      mode = sa[i];
+      el.innerHTML = mode;
+      mode = mode.toLowerCase();
+      //console.log('#### mode_button: col '+ col +' '+ mode);
+   }
+
+   ext_set_mode(mode, null, { open_ext:true });
 }
 
 var step_9_10;
@@ -6109,7 +7824,7 @@ function pop_bottommost_panel(from)
 	for (var i=0;i<from.length;i++)	
 	{
 		actual_order=parseInt(from[i].getAttribute('data-panel-order'));
-		if(actual_order<min_order) 
+		if (actual_order<min_order) 
 		{
 			min_index=i;
 			min_order=actual_order;
@@ -6194,8 +7909,8 @@ function place_panels()
 
 var divControl;
 
-var CONTROL_HEIGHT = 240;
-var OPTBAR_HEIGHT = 120;
+var CONTROL_HEIGHT = 230;
+var OPTBAR_HEIGHT = 136;
 var OPTBAR_TMARGIN = 8;
 
 // called indirectly by a w3_call()
@@ -6218,43 +7933,26 @@ function panel_setup_control(el)
 	   // be shifted up a few pixels. Even the S-meter at the bottom is shifted up. No other browsers
 	   // do this. The only way to fix it is to make the first table row position:relative and then
 	   // shift it down via top:2px. This looks okay in the other browsers and in FF before any reloads.
-	   //w3_table('id-control-1|position:relative; top:2px') +
-	   //w3_table('id-control-1|position:relative;') +
+	   //w3_table('id-control-freq1|position:relative; top:2px') +
+	   //w3_table('id-control-freq1|position:relative;') +
 
-	   w3_table('id-control-1') +
-
-      w3_col_percent('w3-vcenter w3-margin-T-4', '',
-         w3_table('id-control-2'), 90,
-         w3_div('',
-            //w3_icon('id-mute-no w3-center|width:100%;', 'fa-volume-up', '2em', 'lime', 'toggle_mute'),
-            //w3_icon('id-mute-yes w3-center w3-hide|width:100%;', 'fa-volume-off', 20, 'red', 'toggle_mute')
-
-            // from https://jsfiddle.net/cherrador/jomgLb2h since fa doesn't have speaker-slash
-            w3_div('id-mute-no w3_show_inline fa-stack|width:100%;',
-               w3_icon('', 'fa-volume-up fa-stack-2x fa-nudge-right', '2em', 'lime', 'toggle_mute')
-            ),
-            w3_div('id-mute-yes w3_show_inline fa-stack w3-hide|width:100%;color:magenta;',  // hsl(340, 82%, 60%) w3-text-pink but lighter
-               w3_icon('', 'fa-volume-off fa-stack-2x fa-nudge-left', '2em', '', 'toggle_mute'),
-               w3_icon('', 'fa-times fa-right fa-nudge-left', '1em', '', 'toggle_mute')
-            )
-         ), 10
-      ) +
-
-	   w3_table('id-control-mode w3-margin-T-8') +
-	   w3_table('id-control-zoom w3-margin-T-8') +
+	   w3_div('id-control-freq1') +
+	   w3_div('id-control-freq2') +
+	   w3_div('id-control-mode w3-margin-T-6') +
+	   w3_div('id-control-zoom w3-margin-T-6') +
 	   w3_div('id-control-squelch') +
 	   w3_div('id-optbar w3-margin-T-4') +
-	   w3_div('id-optbar-content w3-margin-T-8|overflow:auto; height:'+ px(OPTBAR_HEIGHT),
+	   w3_div('id-optbar-content w3-margin-T-8 w3-scroll-y|height:'+ px(OPTBAR_HEIGHT),
 	      w3_div('id-optbar-wf w3-hide'),
 	      w3_div('id-optbar-audio w3-hide'),
 	      w3_div('id-optbar-agc w3-hide'),
-	      w3_div('id-optbar-users w3-hide'),
+	      w3_div('id-optbar-users w3-hide w3-scroll-x'),
 	      w3_div('id-optbar-status w3-hide')
 	   ) +
 	   w3_div('id-control-smeter w3-margin-T-8');
 
 	// make first line of controls full width less vis button
-	w3_el('id-control-1').style.width = px(el.activeWidth - visIcon - 6);
+	w3_el('id-control-freq1').style.width = px(el.activeWidth - visIcon - 6);
 	
 	w3_show_hide('id-mute-no', !muted);
 	w3_show_hide('id-mute-yes', muted);
@@ -6289,23 +7987,30 @@ function panel_set_width_height(id, width, height)
 	panel_set_vis_button(id);
 }
 
-// ========================================================
-// =======================  >MISC  ========================
-// ========================================================
+////////////////////////////////
+// misc
+////////////////////////////////
 
-function event_dump(evt, id)
+function event_dump(evt, id, oneline)
 {
-	console.log('EVENT_DUMP: '+ id +' type='+ evt.type +' ----');
-	console.log('id='+ this.id +' name='+ evt.target.nodeName +' tgtID='+ evt.target.id +' ctgtID='+ evt.currentTarget.id);
-	console.log('sft='+evt.shiftKey+' alt='+evt.altKey+' ctrl='+evt.ctrlKey+' meta='+evt.metaKey+' key='+evt.key);
-	console.log('button='+evt.button+' buttons='+evt.buttons+' detail='+evt.detail+' which='+evt.which);
-	console.log('offX='+evt.offsetX+' pageX='+evt.pageX+' clientX='+evt.clientX+' layerX='+evt.layerX );
-	console.log('offY='+evt.offsetY+' pageY='+evt.pageY+' clientY='+evt.clientY+' layerY='+evt.layerY );
-	console.log('evt, evt.target, evt.currentTarget:');
-	console.log(evt);
-	console.log(evt.target);
-	console.log(evt.currentTarget);
-	console.log('----');
+   if (oneline) {
+      var trel = (isDefined(evt.relatedTarget) && evt.relatedTarget)? (' Trel='+ evt.relatedTarget.id) : '';
+      console.log('event_dump '+ id +' '+ evt.type +' T='+ evt.target.id +' Tcur='+ evt.currentTarget.id + trel);
+   } else {
+      console.log('================================');
+      console.log('EVENT_DUMP: '+ id +' type='+ evt.type);
+      console.log((evt.shiftKey? 'SFT ':'') + (evt.ctrlKey? 'CTL ':'') + (evt.altKey? 'ALT ':'') + (evt.metaKey? 'META ':'') +'key='+evt.key);
+      console.log('this.id='+ this.id +' tgt.name='+ evt.target.nodeName +' tgt.id='+ evt.target.id +' ctgt.id='+ evt.currentTarget.id);
+      console.log('button='+evt.button+' buttons='+evt.buttons+' detail='+evt.detail+' which='+evt.which);
+      console.log('offX='+evt.offsetX+' pageX='+evt.pageX+' clientX='+evt.clientX+' layerX='+evt.layerX );
+      console.log('offY='+evt.offsetY+' pageY='+evt.pageY+' clientY='+evt.clientY+' layerY='+evt.layerY );
+      console.log('evt, evt.target, evt.currentTarget, evt.relatedTarget:');
+      console.log(evt);
+      console.log(evt.target);
+      console.log(evt.currentTarget);
+      console.log(evt.relatedTarget);
+      console.log('----');
+   }
 }
 
 function arrayBufferToString(buf) {
@@ -6322,37 +8027,42 @@ function arrayBufferToStringLen(buf, num)
 	return output;
 }
 
-function add_problem(what, sticky, el_id)
+// NB: use kiwi_log() instead of console.log() in here
+function add_problem(what, append, sticky, el_id)
 {
    var id = el_id? el_id : 'id-status-problems'
-	//console.log('add_problem '+ what +' sticky='+ sticky +' id='+ id);
+	//kiwi_log('add_problem '+ what +' sticky='+ sticky +' id='+ id);
 	el = w3_el(id);
 	if (!el) return;
-	if (typeof el.children != "undefined") {
+	if (isDefined(el.children)) {
 		for (var i=0; i < el.children.length; i++) {
 		   if (el.children[i].innerHTML == what) {
 		      return;
 		   }
 		}
+		if (append == false) {
+		   while (el.firstChild) {
+		      el.removeChild(el.firstChild);
+		   }
+		}
 	}
-	new_span = document.createElement("span");
-	new_span.innerHTML = what;
-	el.appendChild(new_span);
+	var new_span = w3_appendElement(el, "span", what);
 	if (sticky != true) {
-		window.setTimeout(function(ps, ns) { ps.removeChild(ns); }, 1000, el, new_span);
+		window.setTimeout(function(ps, ns) { try { ps.removeChild(ns); } catch(ex) {} }, 1000, el, new_span);
 	}
 }
 
 function set_gen(freq, attn)
 {
+   //console.log('set_gen freq='+ freq +' attn='+ attn);
 	snd_send("SET genattn="+ attn.toFixed(0));
 	snd_send("SET gen="+ freq +" mix=-1");
 }
 
 
-// ========================================================
-// =======================  >WEBSOCKET  ===================
-// ========================================================
+////////////////////////////////
+// websocket
+////////////////////////////////
 
 var bin_server = 0;
 var zoom_server = 0;
@@ -6369,8 +8079,6 @@ function owrx_msg_cb(param, ws)
 			// now that we have the list of extensions see if there is an override
 			if (override_ext)
 				extint_open(override_ext, 3000);
-			else
-				if (override_mode == 's4285') extint_open('s4285', 3000);	//jks
 			break;
 		case "bandwidth":
 			bandwidth = parseInt(param[1]);
@@ -6380,6 +8088,9 @@ function owrx_msg_cb(param, ws)
 			break;
 		case "wf_fft_size":
 			wf_fft_size = parseInt(param[1]);
+			break;
+		case "wf_fps_max":
+			wf_fps_max = parseInt(param[1]);
 			break;
 		case "wf_fps":
 			wf_fps = parseInt(param[1]);
@@ -6416,7 +8127,11 @@ function owrx_msg_cb(param, ws)
 			//console.log('SQ '+ squelch_state);
 			if (el) el.style.color = squelch_state? 'lime':'white';
 			break;
+		default:
+		   return false;
 	}
+	
+	return true;
 }
 
 function owrx_ws_open_snd(cb, cbp)
@@ -6485,22 +8200,12 @@ function send_keepalive()
 			if (!ident_user) ident_user = '';
 			if (snd_send("SET ident_user="+ encodeURIComponent(ident_user)) < 0)
 				break;
-			
-			// FIXME temporary until dedicated experiment mechanism is implemented
-			if (Sha256.hash(ident_user) == 'd51c59f101ec361eac5a77ac2414214481e5d7e330a854d299fbf4e3fc3ae314') {
-				inactivity_timeout_override = 0;
-				need_status = true;
-			}
 			need_ident = false;
 		}
 	
 		if (need_status) {
 			if (snd_send("SET need_status=1") < 0)
 				break;
-			if (inactivity_timeout_override == 0) {
-				if (snd_send("SET OVERRIDE inactivity_timeout=0") < 0)
-					break;
-			}
 			need_status = false;
 		}
 	}

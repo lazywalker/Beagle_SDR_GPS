@@ -1,4 +1,4 @@
-[updated 22-April-2017]
+[updated 8 January 2020]
 
 [![KiwiSDR](http://www.kiwisdr.com/ks/Seeed.sample.1.780px.jpg)](http://www.kiwisdr.com/ks/Seeed.sample.1.jpg)
 
@@ -14,19 +14,16 @@ Software-defined Radio (SDR) and GPS for the BeagleBone Black
 
 An add-on board ("cape") that turns your Beagle into a web-accessible shortwave receiver.
 
-Note: the KiwiSDR PCB design has moved to a separate repository called [KiwiSDR_PCB](https://github.com/jks-prv/KiwiSDR_PCB/).
-
 ### Kickstarter
 KiwiSDR had a successful [Kickstarter](https://www.kickstarter.com/projects/1575992013/kiwisdr-beaglebone-software-defined-radio-sdr-with/).
 
 ### Details
 
-* Listen live: [New Zealand](http://kiwisdr.com:8073), [Canada](http://kiwisdr.ece.uvic.ca:8073), [Sweden](http://kiwisdr.sk3w.se:8073), all others on [SDR.hu](http://sdr.hu/?top=kiwi)
+* Listen live: [List](http://kiwisdr.com/public), [Map](http://rx.linkfanel.net)
+* [Project webpage](http://www.kiwisdr.com/)
 * [Operating information: installation, operation, FAQ](http://www.kiwisdr.com/quickstart/)
-* Master [bug/wish list](http://kiwisdr.com/bugs/)
 * Latest [source code commits](https://github.com/jks-prv/Beagle_SDR_GPS/commits/master)
 * [Design review document](https://www.dropbox.com/s/i1bjyp1acghnc16/KiwiSDR.design.review.pdf?dl=1)
-* [Project status & history](http://www.kiwisdr.com/)
 * [Schematic](http://www.kiwisdr.com/docs/KiwiSDR/kiwi.schematic.pdf), [Gerbers](http://www.kiwisdr.com/docs/KiwiSDR/kiwi.gerbers.tar), [Active antenna](http://www.kiwisdr.com/docs/KiwiSDR/ant.pdf), [BOM ODS](http://www.kiwisdr.com/docs/KiwiSDR/kiwi.bom.ods), [BOM XLS](http://www.kiwisdr.com/docs/KiwiSDR/kiwi.bom.xls)
 
 ### Description
@@ -42,22 +39,19 @@ This SDR is a bit different. It has a web interface that can be used by up to fo
 
 ### Features
 * 100% Open Source / Open Hardware.
-* Includes VLF-HF active antenna and associated power injector PCBs.
 * Browser-based interface allowing multiple simultaneous user web connections (currently 4).
 * Each connection tunes an independent receiver channel over the entire spectrum.
 * Waterfall tunes independently of audio and includes zooming and panning.
 * Multi-channel, parallel DDC design using bit-width optimized CIC filters.
-* Good performance at VLF/LF since I personally spend time monitoring those frequencies.
+* Good performance at VLF/LF since we personally spend time monitoring those frequencies.
 * Automatic frequency calibration via received GPS timing.
 * Easy hardware and software setup. Browser-based configuration interface.
 
 ### Status
 
-Give the live receivers a try at the links above. You'll need a recent version of a modern web browser that supports HTML5. The web interface works, with some problems, on iPad. But there is no mobile version of the interface yet.
+Give the live receivers a try at the links above. You'll need a recent version of a modern web browser that supports HTML5. The web interface works, with some problems, on mobile devices. But there is no mobile version of the interface yet.
 
-The files of a KiCAD PCB layout of the cape are available. This PCB has been fabricated in production quantities
-and shipped to over 350 customers.
-Please email us any comments you have after reviewing the design document above. The active antenna and injector PCBs have been fabricated and are undergoing development.
+Please email us any comments you have after reviewing the design document above.
 
 ### Objectives
 

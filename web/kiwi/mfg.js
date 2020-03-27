@@ -31,7 +31,7 @@ function mfg_draw()
 		) +
 		'<br>' +
 
-		w3_col_percent('', 'w3-hcenter',
+		w3_col_percent('/w3-hcenter',
 			w3_div('id-seq-override w3-btn w3-round-large w3-yellow||onclick="mfg_seq_override()"'), 40,
 			'<input id="id-seq-input" class="w3-input w3-border w3-width-auto w3-hover-shadow w3-hidden" type="text" size=9 onchange="mfg_seq_set()">', 20,
 			w3_div('id-power-off w3-btn w3-round-large|background-color:fuchsia||onclick="mfg_power_off()"'), 40
@@ -179,7 +179,9 @@ function mfg_sd_progress()
 	if (pct <= 95) {	// stall updates until we actually finish in case SD is writing slowly
 		w3_el('id-progress-text').innerHTML = w3_el('id-progress').style.width = pct +'%';
 	}
-	w3_innerHTML('id-progress-time', ((sd_progress / 60) % 60).toFixed(0) +':'+ (sd_progress % 60).toFixed(0).leadingZeros(2));
+	var secs = (sd_progress % 60).toFixed(0).leadingZeros(2);
+	var mins = Math.floor(sd_progress / 60).toFixed(0);
+	w3_innerHTML('id-progress-time', mins +':'+ secs);
 }
 
 function mfg_sd_write_done(err)

@@ -6,6 +6,14 @@
 #ifndef SDR_H
 #define SDR_H
 
+#ifndef assert
+    #define assert(e) \
+        if (!(e)) { \
+            printf("assertion failed: \"%s\" %s line %d\n", #e, __FILE__, __LINE__); \
+            exit(-1); \
+        }
+#endif
+
 #define _CRT_SECURE_NO_WARNINGS
 
 #include <stdio.h>
@@ -707,7 +715,6 @@ extern int getfullpath(char *relpath, char *abspath);
 extern unsigned long tickgetus(void);
 extern void sleepus(int usec);
 extern void settimeout(struct timespec *timeout, int waitms);
-extern double log2(double n);
 extern int calcfftnum(double x, int next);
 extern void *sdrmalloc(size_t size);
 extern void sdrfree(void *p);
@@ -795,7 +802,7 @@ extern void check_hamming(int *hamming, int n, int parity, int m);
 
 /* sdrnav_gps/gal/glo.c/sbs.c ------------------------------------------------*/
 extern int decode_l1ca(sdrnav_t *nav);
-extern int decode_e1b(sdrnav_t *nav);
+extern int decode_e1b(sdrnav_t *nav, int *error);
 extern int decode_g1(sdrnav_t *nav);
 extern int decode_b1i(sdrnav_t *nav);
 extern int decode_l1sbas(sdrnav_t *nav);

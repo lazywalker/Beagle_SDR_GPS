@@ -96,10 +96,10 @@ const double F = -4.442807633e-10; // -2*sqrt(MU)/pow(C,2)
 
 ///////////////////////////////////////////////////////////////////////////////
 
-enum sat_e { Navstar, SBAS, QZSS, E1B };
+typedef enum { Navstar, SBAS, QZSS, E1B } sat_e;
 const char sat_s[sizeof(sat_e)] = { 'N', 'S', 'Q', 'E' };
 
-struct SATELLITE {
+typedef struct {
     int prn;
     union {
         struct {
@@ -110,27 +110,28 @@ struct SATELLITE {
         };
     };
     sat_e type;
+    
     int sat;
     char *prn_s;
     bool busy;
-};
+} SATELLITE;
 
 #define is_Navstar(sat)     (Sats[sat].type == Navstar)
 #define is_SBAS(sat)        (Sats[sat].type == SBAS)
 #define is_QZSS(sat)        (Sats[sat].type == QZSS)
 #define is_E1B(sat)         (Sats[sat].type == E1B)
 
-#define MAX_SATS    60
+#define MAX_SATS    64
 
 extern SATELLITE Sats[];
 
 #define G2_INIT     0x400
 
+// maximum number of sats possible, not current number of active sats
 #define NUM_NAVSTAR_SATS    32
+#define NUM_E1B_SATS        50
 
-#define NUM_E1B_SATS    50
-
-extern u2_t E1B_code16[NUM_E1B_SATS][I_DIV_CEIL(E1B_CODELEN, 16)];
+extern u1_t E1B_code1[NUM_E1B_SATS][E1B_CODELEN];
 
 #define PRN(sat)        (Sats[sat].prn_s)
 
@@ -140,8 +141,8 @@ extern u2_t E1B_code16[NUM_E1B_SATS][I_DIV_CEIL(E1B_CODELEN, 16)];
 void SearchInit();
 void SearchFree();
 void SearchTask(void *param);
-bool SearchTaskRun();
-void SearchEnable(int ch, int sat, bool restart);
+void SearchTaskRun();
+void SearchEnable(int sat);
 void SearchParams(int argc, char *argv[]);
 
 //////////////////////////////////////////////////////////////
@@ -154,6 +155,7 @@ void ChanTask(void *param);
 int  ChanReset(int sat, int codegen_init);
 void ChanStart(int ch, int sat, int t_sample, int lo_shift, int ca_shift, int snr);
 bool ChanSnapshot(int ch, uint16_t wpos, int *p_sat, int *p_bits, int *p_bits_tow, float *p_pwr);
+void ChanRemove(sat_e type);
 
 //////////////////////////////////////////////////////////////
 // Solution
@@ -163,7 +165,7 @@ void SolveTask(void *param);
 //////////////////////////////////////////////////////////////
 // User interface
 
-enum STAT {
+typedef enum {
     STAT_SAT,
     STAT_POWER,
     STAT_WDOG,
@@ -181,35 +183,62 @@ enum STAT {
     STAT_NOVFL,
     STAT_DEBUG,
     STAT_SOLN
-};
+} STAT;
 
-struct azel_t {
+#define GPS_ERR_SLIP    1
+#define GPS_ERR_CRC     2
+#define GPS_ERR_ALERT   3
+#define GPS_ERR_OOS     4
+#define GPS_ERR_PAGE    5
+
+typedef struct {
     int az, el;
-};
+} azel_t;
 
-struct gps_stats_t {
+typedef struct {
+    int sat;
+    int snr;
+    int rssi, gain;
+    #define GPS_N_AGE (8 + SPACE_FOR_NULL)
+    char age[GPS_N_AGE];
+    bool too_old;
+    int wdog;
+    int hold, ca_unlocked, parity, alert;
+    int sub, sub_renew;
+    int novfl, frames, par_errs;
+    int az, el;
+    int has_soln;
+    int ACF_mode;
+} gps_chan_t;
+
+typedef struct {
+    int x, y;
+    float lat, lon;
+} gps_pos_t;
+
+typedef struct {
+    float lat, lon;
+} gps_map_t;
+
+typedef struct {
+    int n_Navstar, n_QZSS, n_E1B;
+    bool acq_Navstar, acq_QZSS, QZSS_prio, acq_Galileo;
 	bool acquiring, tLS_valid;
 	unsigned start, ttff;
-	int tracking, good, fixes, FFTch;
+	int tracking, good, FFTch;
+
+    int last_samp_hour;
+	u4_t fixes, fixes_min, fixes_min_incr;
+	u4_t fixes_hour, fixes_hour_incr, fixes_hour_samples;
+
 	double StatSec, StatLat, StatLon, StatAlt, sgnLat, sgnLon;
 	int StatDay;    // 0 = Sunday
 	int StatNS, StatEW;
     signed delta_tLS, delta_tLSF;
     bool include_alert_gps;
-    int soln, E1B_plot_separately;
-	
-	struct gps_chan_t {
-		int sat;
-		int snr;
-		int rssi, gain;
-		int wdog;
-		int hold, ca_unlocked, parity, alert;
-		int sub, sub_renew;
-		int novfl, frames, par_errs;
-		int az, el;
-		int soln;
-		int ACF_mode;
-	} ch[GPS_CHANS];
+    bool include_E1B;
+    int soln_type, E1B_plot_separately;
+	gps_chan_t ch[GPS_CHANS];
 	
 	//#define AZEL_NSAMP (4*60)
 	#define AZEL_NSAMP 60
@@ -224,33 +253,38 @@ struct gps_stats_t {
 	s2_t IQ_data[GPS_IQ_SAMPS_W];
 	u4_t IQ_seq_w, IQ_seq_r;
 
+    // reference lat/lon from early GPS fix
 	bool have_ref_lla;
 	float ref_lat, ref_lon, ref_alt;
 
-    #define WITHOUT_E1B 0
-    #define WITH_E1B 1
-    #define ONLY_E1B 2
+    // lat/lon returned by ipinfo lookup
+	bool ipinfo_ll_valid;
+	float ipinfo_lat, ipinfo_lon;
+
+    // E1B_plot_separately == false
+    #define MAP_ALL 0           // green map pin
+    
+    // E1B_plot_separately == true
+    #define MAP_WITHOUT_E1B 0   // green map pin
+    #define MAP_WITH_E1B 1      // red map pin
+    #define MAP_ONLY_E1B 2      // yellow map pin
 
     #define GPS_NPOS 2
     #define GPS_POS_SAMPS 64
-	struct gps_pos_t {
-	    int x, y;
-	    float lat, lon;
-	} POS_data[GPS_NPOS][GPS_POS_SAMPS];
+	gps_pos_t POS_data[GPS_NPOS][GPS_POS_SAMPS];
 	u4_t POS_seq, POS_next, POS_len, POS_seq_w, POS_seq_r;
 	
     #define GPS_NMAP 3
     #define GPS_MAP_SAMPS 16
-	struct gps_map_t {
-	    u4_t seq;
-	    float lat, lon;
-	} MAP_data[GPS_NMAP][GPS_MAP_SAMPS];
+	gps_map_t MAP_data[GPS_NMAP][GPS_MAP_SAMPS];
+	u4_t MAP_data_seq[GPS_MAP_SAMPS];
 	u4_t MAP_next, MAP_len, MAP_seq_w, MAP_seq_r;
 	
 	int gps_gain, kick_lo_pll_ch;
-};
+	char a[32];
+} gps_t;
 
-extern gps_stats_t gps;
+extern gps_t gps;
 
 extern const char *Week[];
 
@@ -263,9 +297,10 @@ struct UMS {
     }
 };
 
+void GPSstat(STAT st, double, int=0, int=0, int=0, int=0, double=0);
+
 unsigned bin(char *s, int n);
 void StatTask(void *param);
 void GPSstat_init();
-void GPSstat(STAT st, double, int=0, int=0, int=0, int=0, double=0);
 
 #endif

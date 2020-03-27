@@ -1,81 +1,140 @@
 VERSION_MAJ = 1
-VERSION_MIN = 181
+VERSION_MIN = 383
 
 REPO_NAME = Beagle_SDR_GPS
-DEBIAN_VER = 8.5
+DEBIAN_VER = 8.11
 
 # Caution: software update mechanism depends on format of first two lines in this file
 
 #
 # Makefile for KiwiSDR project
 #
-# Copyright (c) 2014-2017 John Seamons, ZL/KF6VO
-#
-
+# Copyright (c) 2014-2019 John Seamons, ZL/KF6VO
 #
 # This Makefile can be run on both a build machine (I use a MacBook Pro) and the
 # BeagleBone Black target (Debian release).
-# Which machine you're on is figured out by this:
-#
-#	DEBIAN_DEVSYS = $(shell grep -q -s Debian /etc/dogtag; echo $$?)
-#	DEBIAN = 0
-#	NOT_DEBIAN = 1
-#	DEVSYS = 2
-#	ifeq ($(DEBIAN_DEVSYS),$(DEBIAN))
-#		...
-#	ifeq ($(DEBIAN_DEVSYS),$(DEVSYS))
-#		...
-#
-# The '/etc/dogtag' file is present on the Beagle and not on the dev machine.
-# Grep returns 0 if "Debian" is found in /etc/dogtag, 1 if it isn't and 2 if /etc/dogtag doesn't exist.
-# This same mechanism is used in the wrapper shell script because device tree files need to be
-# loaded only on the Beagle.
 #
 
 #
 # installing FFTW:
-#
 #	to create /usr/local/lib/libfftw3f.a (the 'f' in '3f' means single precision)
+#
 #	Mac:
 #		download the sources from fftw.org
 #		./configure --enable-single
 #		make
 #		(sudo) make install
+#
 #	BeagleBone Black, Debian:
 #		the Makefile automatically installs the package using apt-get
 #
 
+
+################################
+# build environment detection
+################################
+
+include Makefile.comp.inc
+
+ifeq ($(DEBIAN_DEVSYS),$(DEBIAN))
+
+	# enough parallel make jobs to overcome core stalls from filesystem or nfs delays
+	ifeq ($(BBAI),true)
+#		MAKE_ARGS = -j 2
+		MAKE_ARGS =
+	else
+		ifeq ($(DEBIAN_7),true)
+			# Debian 7 gcc runs out of memory compiling edata_always*.cpp in parallel
+			MAKE_ARGS =
+		else
+#			MAKE_ARGS = -j 4
+			MAKE_ARGS =
+		endif
+	endif
+else
+	# choices when building on development machine
+	BBAI = true
+#	BBAI = false
+	DEBIAN_7 = false
+	MAKE_ARGS = -j
+endif
+
 ARCH = sitara
-PLATFORM = beaglebone_black
 
-DEBIAN_DEVSYS = $(shell grep -q -s Debian /etc/dogtag; echo $$?)
-DEBIAN = 0
-NOT_DEBIAN = 1
-DEVSYS = 2
-
-DEBIAN_7 = $(shell test -f /sys/devices/platform/bone_capemgr/slots; echo $$?)
-
-# makes compiles fast on dev system
-ifeq ($(DEBIAN_DEVSYS),$(DEVSYS))
-	OPT = O0
+ifeq ($(BBAI),true)
+	CPU = AM5729
+	PLATFORM = beaglebone_ai
+	CFLAGS += -DMULTI_CORE
 else
-#	OPT = O0
+	CPU = AM3359
+	PLATFORM = beaglebone_black
 endif
 
-OBJ_DIR = obj
-OBJ_DIR_O3 = $(OBJ_DIR)_O3
-KEEP_DIR = obj_keep
-
+# make the compiles fast on dev system
 ifeq ($(DEBIAN_DEVSYS),$(DEVSYS))
-	PKGS = pkgs pkgs/mongoose pkgs/jsmn pkgs/parson pkgs/sha256
-else
-#	PKGS = pkgs pkgs/mongoose pkgs/jsmn pkgs/parson pkgs/sha256 pkgs/webrtc $(sort $(dir $(wildcard pkgs/webrtc/*/*)))
-	PKGS = pkgs pkgs/mongoose pkgs/jsmn pkgs/parson pkgs/sha256
+	OPT = 0
 endif
+
+# uncomment when using debugger so variables are not always optimized away
+ifeq ($(DEBIAN_DEVSYS),$(DEBIAN))
+#	OPT = 0
+endif
+
+
+################################
+# "all" target must be first
+################################
+.PHONY: all
+all: c_ext_clang_conv
+	@make $(MAKE_ARGS) c_ext_clang_conv_all
+
+
+################################
+# build files/directories
+################################
+
+# The built files (generated .cpp/.h files, binaries etc.) are placed outside of the source tree
+# into the BUILD_DIR. This is so NFS can be used to share the sources between the
+# development machine and the Kiwi Beagle. If the build files were also shared there would
+# be file overwrites on one machine when you built on the other (and lots of unnecessary NFS copying
+# back and forth. See the nfs and nfsup aliases in /root/.bashrc for NFS setup details.
+
+BUILD_DIR = ../build
+OBJ_DIR = $(BUILD_DIR)/obj
+OBJ_DIR_O3 = $(BUILD_DIR)/obj_O3
+KEEP_DIR = $(BUILD_DIR)/obj_keep
+GEN_DIR = $(BUILD_DIR)/gen
+TOOLS_DIR = $(BUILD_DIR)/tools
+
+ifeq ($(OPT),0)
+	OBJ_DIR_DEFAULT = $(OBJ_DIR)
+else
+	OBJ_DIR_DEFAULT = $(OBJ_DIR_O3)
+endif
+
+PKGS = pkgs/mongoose
+PKGS_O3 = pkgs/jsmn pkgs/sha256 pkgs/TNT_JAMA
+
+# Each (internal) extension can have an optional Makefile:
+# The extension can opt-out of being included via EXT_SKIP (e.g. BBAI only, not Debian 7 etc.)
+# EXT_SUBDIRS define any sub-dirs within the extension.
+# EXT_DEFINES set any additional defines for the extension.
+# Same for additional required libs via LIBS_DEP and LIBS.
+# All of these should be appended to using "+="
+EXT_SKIP =
+EXT_SUBDIRS =
+EXT_DEFINES =
+LIBS_DEP =
+LIBS =
+-include $(wildcard extensions/*/Makefile)
 
 PVT_EXT_DIR = ../extensions
-PVT_EXT_DIRS = $(sort $(dir $(wildcard $(PVT_EXT_DIR)/*/extensions/*/*)))
-INT_EXT_DIRS = $(sort $(dir $(wildcard extensions/*/*)))
+PVT_EXT_DIRS = $(sort $(dir $(wildcard $(PVT_EXT_DIR)/*/extensions/*/)))
+
+INT_EXT_DIRS1 = $(sort $(dir $(wildcard extensions/*/)))
+EXT_SKIP1 = $(addsuffix /,$(addprefix extensions/,$(EXT_SKIP)))
+INT_EXT_DIRS = $(subst $(EXT_SKIP1),,$(INT_EXT_DIRS1))
+
 EXT_DIRS = $(INT_EXT_DIRS) $(PVT_EXT_DIRS)
 
 PVT_EXTS = $(subst $(PVT_EXT_DIR)/,,$(wildcard $(PVT_EXT_DIR)/*))
@@ -83,221 +142,525 @@ INT_EXTS = $(subst /,,$(subst extensions/,,$(wildcard $(INT_EXT_DIRS))))
 EXTS = $(INT_EXTS) $(PVT_EXTS)
 
 GPS = gps gps/ka9q-fec gps/GNSS-SDRLIB
+RX = rx rx/CuteSDR rx/csdr rx/kiwi
+_DIRS = pru $(PKGS)
+_DIRS_O3 += . $(PKGS_O3) platform/beaglebone platform/$(PLATFORM) $(EXT_DIRS) $(EXT_SUBDIRS) \
+	$(RX) $(GPS) ui init support net web arch/$(ARCH)
 
-ifeq ($(OPT),O0)
-	DIRS = . pru $(PKGS) web extensions
-	DIRS += platform/$(PLATFORM) $(EXT_DIRS) rx rx/CuteSDR rx/csdr rx/kiwi $(GPS) ui support arch arch/$(ARCH)
-else
-	DIRS = . pru $(PKGS) web extensions
-endif
-
-ifeq ($(OPT),O0)
+ifeq ($(OPT),0)
+	DIRS = $(_DIRS) $(_DIRS_O3)
 	DIRS_O3 =
 else
-	DIRS_O3 = platform/$(PLATFORM) $(EXT_DIRS) rx rx/CuteSDR rx/csdr rx/kiwi $(GPS) ui support arch arch/$(ARCH)
+	DIRS = $(_DIRS)
+	DIRS_O3 = $(_DIRS_O3)
 endif
 
-VPATH = $(DIRS) $(DIRS_O3)
-I = $(addprefix -I,$(DIRS)) $(addprefix -I,$(DIRS_O3)) -I/usr/local/include
+VPATH = $(DIRS) $(DIRS_O3) $(EXT_SUBDIRS_KEEP)
+I = -I$(GEN_DIR) $(addprefix -I,$(DIRS)) $(addprefix -I,$(DIRS_O3)) $(addprefix -I,$(EXT_SUBDIRS_KEEP)) -I/usr/local/include
 H = $(wildcard $(addsuffix /*.h,$(DIRS))) $(wildcard $(addsuffix /*.h,$(DIRS_O3)))
-C = $(wildcard $(addsuffix /*.c,$(DIRS)))
+CPP_F = $(wildcard $(addsuffix /*.cpp,$(DIRS)))
+CPP_F_O3 = $(wildcard $(addsuffix /*.cpp,$(DIRS_O3)))
+CFILES_KEEP = $(wildcard $(addsuffix /*.cpp,$(EXT_SUBDIRS_KEEP)))
 
 # remove generated files
-REMOVE = $(subst extensions/ext_init.c,,$(subst web/web.c,,$(subst web/edata_embed.c,,$(subst web/edata_always.c,,$(C)))))
-CFILES = $(REMOVE) $(wildcard $(addsuffix /*.cpp,$(DIRS)))
-CFILES_O3 = $(wildcard $(addsuffix /*.c,$(DIRS_O3))) $(wildcard $(addsuffix /*.cpp,$(DIRS_O3)))
-CFLAGS_UNSAFE_OPT = -fcx-limited-range -funsafe-math-optimizations
+CFILES = $(subst web/web.cpp,,$(CPP_F))
+CFILES_O3 = $(subst web/web.cpp,,$(CPP_F_O3))
 
 ifeq ($(DEBIAN_DEVSYS),$(DEVSYS))
-# development machine, compile simulation version
-	CFLAGS = -g -MD -DDEBUG -DDEVSYS
-	LIBS = -L/usr/local/lib -lfftw3f -lfftw3
-	LIBS_DEP = /usr/local/lib/libfftw3f.a /usr/local/lib/libfftw3.a
+	# development machine, compile simulation version
+	LIBS += -L/usr/local/lib -lfftw3f -lfftw3
+	LIBS_DEP += /usr/local/lib/libfftw3f.a /usr/local/lib/libfftw3.a
 	CMD_DEPS =
 	DIR_CFG = unix_env/kiwi.config
 	CFG_PREFIX = dist.
+
 else
-# host machine (BBB), only build the FPGA-using version
-#	CFLAGS = -mfloat-abi=softfp -mfpu=neon
-	CFLAGS =  -mfpu=neon -mtune=cortex-a8 -mcpu=cortex-a8 -mfloat-abi=hard
-#	CFLAGS += -O3
-	CFLAGS += -g -MD -DDEBUG -DHOST
-#	CFLAGS += -std=c++11 -DWEBRTC_POSIX
-	LIBS = -lfftw3f -lfftw3 -lutil
-	LIBS_DEP = /usr/lib/arm-linux-gnueabihf/libfftw3f.a /usr/lib/arm-linux-gnueabihf/libfftw3.a /usr/sbin/avahi-autoipd /usr/bin/upnpc
-	CMD_DEPS = /usr/sbin/avahi-autoipd /usr/bin/upnpc /usr/bin/dig /usr/bin/pnmtopng
+	# host machine (BBB), only build the FPGA-using version
+	LIBS += -lfftw3f -lfftw3 -lutil
+	LIBS_DEP += /usr/lib/arm-linux-gnueabihf/libfftw3f.a /usr/lib/arm-linux-gnueabihf/libfftw3.a
+	CMD_DEPS = $(CMD_DEPS_DEBIAN) /usr/sbin/avahi-autoipd /usr/bin/upnpc /usr/bin/dig /usr/bin/pnmtopng /sbin/ethtool /usr/bin/sshpass
+	CMD_DEPS += /usr/bin/killall /usr/bin/dtc /usr/bin/curl /usr/bin/wget
 	DIR_CFG = /root/kiwi.config
 	CFG_PREFIX =
 
-ifeq ($(DEBIAN_7),1)
-#	-lrt required for clock_gettime() on Debian 7; see clock_gettime(2) man page
-	LIBS += -lrt
+	ifeq ($(BBAI),true)
+		CMD_DEPS += /usr/bin/cpufreq-info
+	endif
+
+	# -lrt required for clock_gettime() on Debian 7; see clock_gettime(2) man page
+	# jq command isn't available on Debian 7
+	ifeq ($(DEBIAN_7),true)
+		LIBS += -lrt
+	else
+		CMD_DEPS += /usr/bin/jq
+	endif
+endif
+
+
+################################
+# package install
+################################
+
+# install packages for needed libraries or commands
+# some of these are prefixed with "-" to keep update from failing if there is damage to /var/lib/dpkg/info
+ifeq ($(DEBIAN_DEVSYS),$(DEBIAN))
+
+KEYRING = $(DIR_CFG)/.keyring.dep
+$(KEYRING):
+	@echo "KEYRING.."
+ifeq ($(DEBIAN_7),true)
+	cp /etc/apt/sources.list /etc/apt/sources.list.orig
+	sed -e 's/ftp\.us/archive/' < /etc/apt/sources.list >/tmp/sources.list
+	mv /tmp/sources.list /etc/apt/sources.list
+endif
+	-apt-get -y update
+	-apt-get -y install debian-archive-keyring
+	-apt-get -y update
+	@mkdir -p $(DIR_CFG)
+	touch $(KEYRING)
+
+/usr/lib/arm-linux-gnueabihf/libfftw3f.a /usr/lib/arm-linux-gnueabihf/libfftw3.a:
+	apt-get -y install libfftw3-dev
+
+# NB not a typo: "clang-6.0" vs "clang-7"
+
+/usr/bin/clang-6.0:
+	# only available recently?
+	-apt-get -y update
+	apt-get -y install clang-6.0
+
+/usr/bin/clang-7:
+	-apt-get -y update
+	apt-get -y install clang-7
+
+/usr/bin/curl:
+	-apt-get -y install curl
+
+/usr/bin/wget:
+	-apt-get -y install wget
+
+/usr/sbin/avahi-autoipd:
+	-apt-get -y install avahi-daemon avahi-utils libnss-mdns avahi-autoipd
+
+/usr/bin/upnpc:
+	-apt-get -y install miniupnpc
+
+/usr/bin/dig:
+	-apt-get -y install dnsutils
+
+/usr/bin/pnmtopng:
+	-apt-get -y install pnmtopng
+
+/sbin/ethtool:
+	-apt-get -y install ethtool
+
+/usr/bin/sshpass:
+	-apt-get -y install sshpass
+
+/usr/bin/killall:
+	-apt-get -y install psmisc
+
+/usr/bin/dtc:
+	-apt-get -y install device-tree-compiler
+
+ifeq ($(BBAI),true)
+/usr/bin/cpufreq-info:
+	-apt-get -y install cpufrequtils
+endif
+
+ifneq ($(DEBIAN_7),true)
+/usr/bin/jq:
+	-apt-get -y install jq
 endif
 
 endif
 
+
+################################
 # dependencies
-#ALL_DEPS = pru/pru_realtime.bin
+################################
+
 #SRC_DEPS = Makefile
 SRC_DEPS = 
-BIN_DEPS = KiwiSDR.bit
-DEVEL_DEPS = $(OBJ_DIR)/web_devel.o $(KEEP_DIR)/edata_always.o
-EMBED_DEPS = $(OBJ_DIR)/web_embed.o $(OBJ_DIR)/edata_embed.o $(KEEP_DIR)/edata_always.o
+BIN_DEPS = KiwiSDR.rx4.wf4.bit KiwiSDR.rx8.wf2.bit KiwiSDR.rx3.wf3.bit KiwiSDR.rx14.wf0.bit
+#BIN_DEPS = 
+DEVEL_DEPS = $(OBJ_DIR_DEFAULT)/web_devel.o $(KEEP_DIR)/edata_always.o
+EMBED_DEPS = $(OBJ_DIR_DEFAULT)/web_embed.o $(OBJ_DIR)/edata_embed.o $(KEEP_DIR)/edata_always.o
 EXTS_DEPS = $(OBJ_DIR)/ext_init.o
 
-GEN_ASM = kiwi.gen.h verilog/kiwi.gen.vh
-OUT_ASM = e_cpu/kiwi.aout
-GEN_VERILOG = verilog/rx/cic_rx1.vh verilog/rx/cic_rx2.vh
-GEN_NOIP2 = pkgs/noip2/noip2
-ALL_DEPS += $(GEN_ASM) $(OUT_ASM) $(GEN_VERILOG) $(CMD_DEPS) $(GEN_NOIP2)
+# these MUST be run by single-threaded make before use of -j in sub makes
+GEN_ASM = $(GEN_DIR)/kiwi.gen.h verilog/kiwi.gen.vh
+OUT_ASM = $(GEN_DIR)/kiwi.aout
+GEN_VERILOG = $(addprefix verilog/rx/,cic_rx1_12k.vh cic_rx1_20k.vh cic_rx2_12k.vh cic_rx2_20k.vh cic_rx3_12k.vh cic_rx3_20k.vh cic_wf1.vh cic_wf2.vh)
+GEN_NOIP2 = $(GEN_DIR)/noip2
+SUB_MAKE_DEPS = $(KEYRING) $(CMD_DEPS) $(LIBS_DEP) $(GEN_ASM) $(OUT_ASM) $(GEN_VERILOG) $(GEN_NOIP2)
 
-.PHONY: all
-all: $(LIBS_DEP) $(ALL_DEPS) kiwi.bin
 
+################################
+# flags
+################################
+
+MF_INC = $(GEN_DIR)/Makefile.inc
+START_MF_INC = | tee $(MF_INC) 2>&1
+APPEND_MF_INC = | tee -a $(MF_INC) 2>&1
+
+VERSION = -DVERSION_MAJ=$(VERSION_MAJ) -DVERSION_MIN=$(VERSION_MIN)
+VER = v$(VERSION_MAJ).$(VERSION_MIN)
+V = -Dv$(VERSION_MAJ)_$(VERSION_MIN)
+
+INT_FLAGS += $(VERSION) -DKIWI -DKIWISDR -DARCH_$(ARCH) -DCPU_$(CPU) -DARCH_CPU=$(CPU) -DPLATFORM_$(PLATFORM)
+INT_FLAGS += -DDIR_CFG=STRINGIFY\($(DIR_CFG)\) -DCFG_PREFIX=STRINGIFY\($(CFG_PREFIX)\)
+INT_FLAGS += -DBUILD_DIR=STRINGIFY\($(BUILD_DIR)\) -DREPO=STRINGIFY\($(REPO)\) -DREPO_NAME=STRINGIFY\($(REPO_NAME)\)
+
+
+################################
+# conversion to clang
+################################
+
+# NB: afterwards have to rerun make to pickup filename change!
+ifneq ($(PVT_EXT_DIRS),)
+PVT_EXT_C_FILES = $(shell find $(PVT_EXT_DIRS) -name '*.c' -print)
+endif
+
+.PHONY: c_ext_clang_conv
+c_ext_clang_conv: $(SUB_MAKE_DEPS)
+ifeq ($(PVT_EXT_C_FILES),)
+#	@echo SUB_MAKE_DEPS = $(SUB_MAKE_DEPS)
+#	@echo no installed extensions with files needing conversion from .c to .cpp for clang compatibility
+else
+	@echo PVT_EXT_C_FILES = $(PVT_EXT_C_FILES)
+	@echo convert installed extension .c files to .cpp for clang compatibility
+	find $(PVT_EXT_DIRS) -name '*.c' -exec mv '{}' '{}'pp \;
+endif
+# take this opportunity to consolidate flags into indirect Makefile since Make will be re-invoked
+	@echo "----------------"
+#
+	@echo $(I) $(START_MF_INC)
+#
+	@echo $(APPEND_MF_INC)
+	@echo $(CFLAGS) $(APPEND_MF_INC)
+#
+	@echo $(APPEND_MF_INC)
+	@echo $(CPP_FLAGS) $(APPEND_MF_INC)
+#
+	@echo $(APPEND_MF_INC)
+	@echo $(EXT_DEFINES) $(APPEND_MF_INC)
+#
+	@echo $(APPEND_MF_INC)
+	@echo $(INT_FLAGS) $(APPEND_MF_INC)
+#
+	@echo "----------------"
+
+.PHONY: c_ext_clang_conv_all
+c_ext_clang_conv_all: $(BUILD_DIR)/kiwi.bin
+
+
+################################
 # Makefile dependencies
+################################
+
 # dependence on VERSION_{MAJ,MIN}
 MAKEFILE_DEPS = main.cpp
 MF_FILES = $(addsuffix .o,$(basename $(notdir $(MAKEFILE_DEPS))))
-MF_OBJ = $(wildcard $(addprefix $(OBJ_DIR)/,$(MF_FILES)))
+MF_OBJ = $(addprefix $(OBJ_DIR)/,$(MF_FILES))
 MF_O3 = $(wildcard $(addprefix $(OBJ_DIR_O3)/,$(MF_FILES)))
 $(MF_OBJ) $(MF_O3): Makefile
 
-# install packages for needed libraries or commands
-ifeq ($(DEBIAN_DEVSYS),$(DEBIAN))
-/usr/lib/arm-linux-gnueabihf/libfftw3f.a /usr/lib/arm-linux-gnueabihf/libfftw3.a:
-	apt-get update
-	apt-get -y install libfftw3-dev
 
-# these are prefixed with "-" to keep update from failing if there is damage to /var/lib/dpkg/info
-/usr/sbin/avahi-autoipd:
-	-apt-get update
-	-apt-get -y install avahi-autoipd
-
-# these are prefixed with "-" to keep update from failing if there is damage to /var/lib/dpkg/info
-/usr/bin/upnpc:
-	-apt-get update
-	-apt-get -y install miniupnpc
-
-# these are prefixed with "-" to keep update from failing if there is damage to /var/lib/dpkg/info
-/usr/bin/dig:
-	-apt-get update
-	-apt-get -y install dnsutils
-
-# these are prefixed with "-" to keep update from failing if there is damage to /var/lib/dpkg/info
-/usr/bin/pnmtopng:
-	-apt-get update
-	-apt-get -y install pnmtopng
-endif
-
-# PRU
+################################
+# PRU (not currently used)
+################################
 PASM_INCLUDES = $(wildcard pru/pasm/*.h)
 PASM_SOURCE = $(wildcard pru/pasm/*.c)
 pas: $(PASM_INCLUDES) $(PASM_SOURCE) Makefile
-	cc -Wall -D_UNIX_ -I./pru/pasm $(PASM_SOURCE) -o pas
+	$(CC) -Wall -D_UNIX_ -I./pru/pasm $(PASM_SOURCE) -o pas
 
 pru/pru_realtime.bin: pas pru/pru_realtime.p pru/pru_realtime.h pru/pru_realtime.hp
 	(cd pru; ../pas -V3 -b -L -l -D_PASM_ -D$(SETUP) pru_realtime.p)
 
+
+################################
 # Verilog generator
-$(GEN_VERILOG): kiwi.gen.h verilog/rx/cic_gen.c
+################################
+$(GEN_VERILOG): $(GEN_DIR)/kiwi.gen.h verilog/rx/cic_gen.c
 ifeq ($(DEBIAN_DEVSYS),$(DEVSYS))
 	(cd verilog/rx; make)
 endif
 
+
+################################
 # FPGA embedded CPU
+################################
 $(GEN_ASM): kiwi.config $(wildcard e_cpu/asm/*)
 	(cd e_cpu; make)
 $(OUT_ASM): $(wildcard e_cpu/*.asm)
 	(cd e_cpu; make no_gen)
 
-# noip2 DUC
+
+################################
+# noip.com DDNS DUC
+################################
 $(GEN_NOIP2): pkgs/noip2/noip2.c
 	(cd pkgs/noip2; make)
 
+
+################################
 # web server content
+################################
+
+#
+# How the file optimization strategy works:
+#
+# FIXME
+#	talk about: optim website used, NFS_READ_ONLY, EDATA_DEVEL bypass mode (including -fopt argument)
+#	x should not be embedding version # in min file, but adding on demand like plain file
+#	what to do about version number in .gz files though?
+#	no "-zip" for html files because of possible %[] substitution (replace %[] substitutions)
+#
+# TODO
+#	x concat embed
+#	EDATA_ALWAYS/2
+#	x jpg/png crush in file_optim
+#	x clean target that removes .min .gz
+#
+# CHECK
+#	does google analytics html head insert still work?
+#	x ant_switch still works?
+#	x update from v1.2 still works?
+#	mobile works okay?
+#
+#
+# 1) file_optim program is used to create minified and possibly gzipped versions of web server
+#	content files (e.g. .js .css .html .jpg .png) Because the optimized versions of individual
+#	files are included in the distro the minimization process, which uses an external website and
+#	is very time consuming, is not performed by individual Kiwis as part of the update process.
+#	But file_optim is run as part of the standard Makefile rules to account for any changes a user
+#	may make as part of their own development (i.e. so a make install will continue to work for them)
+#
+# 2) Web server code has been modified to lookup optimized alternatives first, i.e. a reference to
+#	xxx.js will cause lookups in order to: xxx.min.js.gz, xxx.min.js then finally xxx.js
+#
+# 3) Packaging of files. All files are left available individually to support EDATA_DEVEL development.
+#	But for EDATA_EMBED production the minified versions of many files (typically .js and .css) are
+#	concatenated together and gzipped as a single package file.
+#
+# 4) There are special cases. All the mapping-related files are packaged together so they can be
+#	loaded on-demand by the TDoA extension and admin GPS tab. Extension files are not packaged so they
+#	can be loaded on-demand.
+#
+#
+# constituents of edata_embed:
+#	extensions/*/*.min.{js,css}[.gz]
+#	kiwi/{admin,mfg}.min.html
+#	kiwi/{admin,admin_sdr,mfg}.min.js[.gz]	don't package: conflict with each other
+#	kiwi/kiwi_js_load.min.js				don't package: used by dynamic loader
+#	kiwisdr.min.{js,css}.gz					generated package: font-awesome, text-security, w3, w3-ext, openwebrx, kiwi
+#	openwebrx/{index}.min.html
+#	openwebrx/robots.txt
+#	pkgs/js/*.min.js[.gz]
+#	pkgs/xdLocalStorage/*
+#	pkgs_maps/pkgs_maps.min.{js,css}[.gz]	generated package
+#
+#
+# DANGER: old $(TOOLS_DIR)/files_optim in v1.289 prints "panic: argc" when given the args presented
+# from the v1.290 Makefile when invoked by the Makefile inline $(shell ...)
+# So in v1.290 change name of utility to "file_optim" (NB: "file" not "files") so old files_optim will not be invoked.
+# This is an issue because a download & make clean of a new version doesn't remove the old $(TOOLS_DIR)
+#
+
+# files optimizer
+FILE_OPTIM = $(TOOLS_DIR)/file_optim
+FILE_OPTIM_SRC = tools/file_optim.cpp 
+
+$(FILE_OPTIM): $(FILE_OPTIM_SRC)
+#	use $(I) here, not full $(MF_INC)
+	$(CC) $(I) -g $(FILE_OPTIM_SRC) -o $@
+
 -include $(wildcard web/*/Makefile)
 -include $(wildcard web/extensions/*/Makefile)
+-include web/Makefile
 
-EDATA_DEP = web/kiwi/Makefile web/openwebrx/Makefile web/pkgs/Makefile web/extensions/Makefile $(wildcard extensions/*/Makefile)
+# NB: $(FILE_OPTIM) *MUST* be here so "make install" builds EDATA_EMBED properly when NFS_READ_ONLY == yes
+#EDATA_DEP = web/kiwi/Makefile web/openwebrx/Makefile web/pkgs/Makefile web/extensions/Makefile $(wildcard extensions/*/Makefile) $(FILE_OPTIM)
+EDATA_DEP = web/kiwi/Makefile web/openwebrx/Makefile web/pkgs/Makefile web/extensions/Makefile $(FILE_OPTIM)
 
-web/edata_embed.c: $(addprefix web/,$(FILES_EMBED)) $(EDATA_DEP)
-	(cd web; perl mkdata.pl edata_embed $(FILES_EMBED) >edata_embed.c)
+.PHONY: foptim_gen foptim_list foptim_clean
 
-web/edata_always.c: $(addprefix web/,$(FILES_ALWAYS)) $(EDATA_DEP)
-	(cd web; perl mkdata.pl edata_always $(FILES_ALWAYS) >edata_always.c)
+# NEVER let target Kiwis contact external optimization site via foptim_gen.
+# If customers are developing they need to do a "make install" on a development machine
+# OR a "make fopt/foptim" on the Kiwi to explicitly build the optimized files (but only if not NFS_READ_ONLY)
+
+ifeq ($(DEBIAN_DEVSYS),$(DEVSYS))
+foptim_gen: foptim_files_embed foptim_ext foptim_files_maps
+	@echo
+else
+foptim_gen:
+endif
+
+ifeq ($(NFS_READ_ONLY),yes)
+fopt foptim:
+	@echo "can't do fopt/foptim because of NFS_READ_ONLY=$(NFS_READ_ONLY)"
+	@echo "(assumed foptim_gen performed on development machine with a make install)"
+else
+fopt foptim: foptim_files_embed foptim_ext foptim_files_maps
+endif
+
+foptim_list: loptim_embed loptim_ext loptim_maps
+foptim_clean: roptim_embed roptim_ext roptim_maps
+
+FILES_EMBED_SORTED_NW = $(sort $(EMBED_NW) $(EXT_EMBED_NW) $(PKGS_MAPS_EMBED_NW))
+FILES_ALWAYS_SORTED_NW = $(sort $(FILES_ALWAYS))
+#FILES_ALWAYS2_SORTED_NW = $(sort $(FILES_ALWAYS2))
+
+EDATA_EMBED = $(GEN_DIR)/edata_embed.cpp
+EDATA_ALWAYS = $(GEN_DIR)/edata_always.cpp
+
+$(EDATA_EMBED): $(EDATA_DEP) $(addprefix web/,$(FILES_EMBED_SORTED_NW))
+	(cd web; perl mkdata.pl edata_embed $(FILES_EMBED_SORTED_NW) >../$(EDATA_EMBED))
+
+$(EDATA_ALWAYS): $(EDATA_DEP) $(addprefix web/,$(FILES_ALWAYS_SORTED_NW))
+	(cd web; perl mkdata.pl edata_always $(FILES_ALWAYS_SORTED_NW) >../$(EDATA_ALWAYS))
+
+
+################################
+# debug
+################################
+.PHONY: debug
+debug: c_ext_clang_conv
+	@make $(MAKE_ARGS) c_ext_clang_conv_debug
+
+.PHONY: c_ext_clang_conv_debug
+c_ext_clang_conv_debug:
+	@echo version $(VER)
+	@echo UNAME = $(UNAME)
+	@echo DEBIAN_DEVSYS = $(DEBIAN_DEVSYS)
+	@echo ARCH = $(ARCH)
+	@echo CPU = $(CPU)
+	@echo PLATFORM = $(PLATFORM)
+	@echo BUILD_DIR = $(BUILD_DIR)
+	@echo OBJ_DIR = $(OBJ_DIR)
+	@echo OBJ_DIR_O3 = $(OBJ_DIR_O3)
+	@echo OBJ_DIR_DEFAULT = $(OBJ_DIR_DEFAULT)
+	@echo CMD_DEPS = $(CMD_DEPS)
+	@echo OPT = $(OPT)
+	@echo CFLAGS = $(CFLAGS)
+	@echo CPP_FLAGS = $(CPP_FLAGS)
+	@echo
+	@echo DEPS = $(OBJECTS:.o=.d)
+	@echo SRC_DEPS = $(SRC_DEPS)
+	@echo BIN_DEPS = $(BIN_DEPS)
+	@echo SUB_MAKE_DEPS = $(SUB_MAKE_DEPS)
+	@echo GEN_ASM = $(GEN_ASM)
+	@echo
+	@echo FILES_EMBED = $(FILES_EMBED)
+	@echo FILES_EXT = $(FILES_EXT)
+	@echo FILES_ALWAYS = $(FILES_ALWAYS)
+#	@echo FILES_ALWAYS2 = $(FILES_ALWAYS2)
+	@echo
+	@echo EXT_SKIP = $(EXT_SKIP)
+	@echo EXT_SKIP1 = $(EXT_SKIP1)
+	@echo INT_EXT_DIRS1 = $(INT_EXT_DIRS1)
+	@echo INT_EXT_DIRS = $(INT_EXT_DIRS)
+	@echo PVT_EXT_DIRS = $(PVT_EXT_DIRS)
+	@echo EXT_SUBDIRS = $(EXT_SUBDIRS)
+	@echo EXT_DIRS = $(EXT_DIRS)
+	@echo PVT_EXTS = $(PVT_EXTS)
+	@echo INT_EXTS = $(INT_EXTS)
+	@echo EXTS = $(EXTS)
+	@echo
+	@echo DIRS = $(DIRS)
+	@echo DIRS_O3 = $(DIRS_O3)
+	@echo VPATH = $(VPATH)
+	@echo CFILES = $(CFILES)
+	@echo CFILES_O3 = $(CFILES_O3)
+	@echo CFILES_KEEP = $(CFILES_KEEP)
+	@echo OBJECTS = $(OBJECTS)
+	@echo O3_OBJECTS = $(O3_OBJECTS)
+	@echo KEEP_OBJECTS = $(KEEP_OBJECTS)
+	@echo MF_FILES = $(MF_FILES)
+	@echo MF_OBJ = $(MF_OBJ)
+	@echo MF_O3 = $(MF_O3)
+	@echo PKGS = $(PKGS)
+
+.PHONY: makefiles
+makefiles:
+	@echo
+	@echo $(MF_INC)
+	@cat $(MF_INC)
+
+.PHONY: build_log blog
+build_log blog:
+	@-tail -n 500 -f /root/build.log
+
+
+################################
+# general build rules
+################################
 
 # extension init generator and extension-specific makefiles
 -include extensions/Makefile
--include $(wildcard extensions/*/Makefile)
 
-comma := ,
-empty :=
-space := $(empty) $(empty)
-#UI_LIST = $(subst $(space),$(comma),$(KIWI_UI_LIST))
-UI_LIST = $(subst $(space),,$(KIWI_UI_LIST))
-
-VERSION = -DVERSION_MAJ=$(VERSION_MAJ) -DVERSION_MIN=$(VERSION_MIN)
-VER = v$(VERSION_MAJ).$(VERSION_MIN)
-FLAGS += $(I) $(VERSION) -DKIWI -DARCH_$(ARCH) -DPLATFORM_$(PLATFORM)
-FLAGS += -DKIWI_UI_LIST=$(UI_LIST) -DDIR_CFG=\"$(DIR_CFG)\" -DCFG_PREFIX=\"$(CFG_PREFIX)\"
-FLAGS += -DREPO=\"$(REPO)\" -DREPO_NAME=\"$(REPO_NAME)\"
 CSRC = $(notdir $(CFILES))
-CSRC_O3 = $(notdir $(CFILES_O3))
 OBJECTS1 = $(CSRC:%.c=$(OBJ_DIR)/%.o)
 OBJECTS = $(OBJECTS1:%.cpp=$(OBJ_DIR)/%.o)
+
+CSRC_O3 = $(notdir $(CFILES_O3))
 O3_OBJECTS1 = $(CSRC_O3:%.c=$(OBJ_DIR_O3)/%.o)
 O3_OBJECTS = $(O3_OBJECTS1:%.cpp=$(OBJ_DIR_O3)/%.o)
+
+CSRC_KEEP = $(notdir $(CFILES_KEEP))
+KEEP_OBJECTS1 = $(CSRC_KEEP:%.c=$(KEEP_DIR)/%.o)
+KEEP_OBJECTS = $(KEEP_OBJECTS1:%.cpp=$(KEEP_DIR)/%.o)
+
 
 # pull in dependency info for *existing* .o files
 -include $(OBJECTS:.o=.d)
 -include $(O3_OBJECTS:.o=.d)
+-include $(KEEP_OBJECTS:.o=.d)
 -include $(DEVEL_DEPS:.o=.d)
 -include $(EMBED_DEPS:.o=.d)
 -include $(EXTS_DEPS:.o=.d)
 
+COMP_CTR = $(BUILD_DIR)/.comp_ctr
 C_CTR_LINK = 9997
 C_CTR_INSTALL = 9998
 C_CTR_DONE = 9999
 
+.PHONY: c_ctr_reset
 c_ctr_reset:
-	@echo 1 >.comp_ctr
+	@echo 1 >$(COMP_CTR)
 
-kiwi.bin: c_ctr_reset $(OBJ_DIR) $(OBJ_DIR_O3) $(KEEP_DIR) $(OBJECTS) $(O3_OBJECTS) $(BIN_DEPS) $(DEVEL_DEPS) $(EXTS_DEPS)
-	@echo $(C_CTR_LINK) >.comp_ctr
-	g++ $(OBJECTS) $(O3_OBJECTS) $(DEVEL_DEPS) $(EXTS_DEPS) $(LIBS) -o $@
+#
+# IMPORTANT
+#
+# By not including foptim_gen in the dependency list for the development build target $(BUILD_DIR)/kiwi.bin
+# the external optimization site won't be called all the time as incremental changes are made to
+# the js/css/html/image files.
+#
+# But this means a "make install" must be performed on the *development machine* prior to installation
+# on targets or before uploading as a software release.
+# Previously doing a "make install" on the development machine made no sense and was flagged as an error.
+#
 
-kiwid.bin: c_ctr_reset $(OBJ_DIR) $(OBJ_DIR_O3) $(KEEP_DIR) $(OBJECTS) $(O3_OBJECTS) $(BIN_DEPS) $(EMBED_DEPS) $(EXTS_DEPS)
-	@echo $(C_CTR_LINK) >.comp_ctr
-	g++ $(OBJECTS) $(O3_OBJECTS) $(EMBED_DEPS) $(EXTS_DEPS) $(LIBS) -o $@
+$(BUILD_DIR)/kiwi.bin: c_ctr_reset $(OBJ_DIR) $(OBJ_DIR_O3) $(KEEP_DIR) $(OBJECTS) $(O3_OBJECTS) $(KEEP_OBJECTS) $(BIN_DEPS) $(DEVEL_DEPS) $(EXTS_DEPS)
+	@echo $(C_CTR_LINK) >$(COMP_CTR)
+ifneq ($(SAN),1)
+	$(CPP) $(LDFLAGS) $(OBJECTS) $(O3_OBJECTS) $(KEEP_OBJECTS) $(DEVEL_DEPS) $(EXTS_DEPS) $(LIBS) -o $(BUILD_OBJ)
+else
+	@echo loader skipped for static analysis
+endif
 
-debug:
-	@echo version $(VER)
-	@echo DEPS = $(OBJECTS:.o=.d)
-	@echo KIWI_UI_LIST = $(UI_LIST)
-	@echo DEBIAN_DEVSYS = $(DEBIAN_DEVSYS)
-	@echo SRC_DEPS: $(SRC_DEPS)
-	@echo BIN_DEPS: $(BIN_DEPS)
-	@echo CMD_DEPS: $(CMD_DEPS)
-	@echo ALL_DEPS: $(ALL_DEPS)
-	@echo GEN_ASM: $(GEN_ASM)
-	@echo FILES_EMBED: $(FILES_EMBED)
-	@echo FILES_ALWAYS $(FILES_ALWAYS)
-	@echo EXT_DIRS: $(EXT_DIRS)
-	@echo EXTS: $(EXTS)
-	@echo DIRS: $(DIRS)
-	@echo DIRS_O3: $(DIRS_O3)
-	@echo VPATH: $(VPATH)
-	@echo CFILES: $(CFILES)
-	@echo CFILES_O3: $(CFILES_O3)
-	@echo OBJECTS: $(OBJECTS)
-	@echo O3_OBJECTS: $(O3_OBJECTS)
-	@echo MF_OBJ $(MF_OBJ)
-	@echo MF_O3 $(MF_O3)
-	@echo PKGS $(PKGS)
+$(BUILD_DIR)/kiwid.bin: c_ctr_reset foptim_gen $(OBJ_DIR) $(OBJ_DIR_O3) $(KEEP_DIR) $(OBJECTS) $(O3_OBJECTS) $(KEEP_OBJECTS) $(BIN_DEPS) $(EMBED_DEPS) $(EXTS_DEPS)
+	@echo $(C_CTR_LINK) >$(COMP_CTR)
+ifneq ($(SAN),1)
+	$(CPP) $(LDFLAGS) $(OBJECTS) $(O3_OBJECTS) $(KEEP_OBJECTS) $(EMBED_DEPS) $(EXTS_DEPS) $(LIBS) -o $@
+else
+	@echo loader skipped for static analysis
+endif
 
-// auto generation of dependency info, see:
-//	http://scottmcpeak.com/autodepend/autodepend.html
-//	http://make.mad-scientist.net/papers/advanced-auto-dependency-generation
+# auto generation of dependency info, see:
+#	http://scottmcpeak.com/autodepend/autodepend.html
+#	http://make.mad-scientist.net/papers/advanced-auto-dependency-generation
 df = $(basename $@)
 POST_PROCESS_DEPS = \
 	@mv -f $(df).d $(df).d.tmp; \
@@ -306,59 +669,77 @@ POST_PROCESS_DEPS = \
 	sed -e 's/^ *//' -e 's/$$/:/' >> $(df).d; \
 	rm -f $(df).d.tmp
 
-$(OBJ_DIR)/web_devel.o: web/web.c config.h
-	g++ $(CFLAGS) $(FLAGS) -DEDATA_DEVEL -c -o $@ $<
+
+# special
+
+$(OBJ_DIR_DEFAULT)/web_devel.o: web/web.cpp config.h
+	$(CPP) $(V) $(VIS_UNOPT) @$(MF_INC) -DEDATA_DEVEL -c -o $@ $<
 	$(POST_PROCESS_DEPS)
 
-$(OBJ_DIR)/web_embed.o: web/web.c config.h
-	g++ $(CFLAGS) $(FLAGS) -DEDATA_EMBED -c -o $@ $<
+$(OBJ_DIR_DEFAULT)/web_embed.o: web/web.cpp config.h
+	$(CPP) $(V) $(VIS_UNOPT) @$(MF_INC) -DEDATA_EMBED -c -o $@ $<
 	$(POST_PROCESS_DEPS)
 
-$(OBJ_DIR)/edata_embed.o: web/edata_embed.c
-	g++ $(CFLAGS) $(FLAGS) -c -o $@ $<
+$(OBJ_DIR)/edata_embed.o: $(EDATA_EMBED)
+	$(CPP) $(V) $(VIS_UNOPT) @$(MF_INC) -c -o $@ $<
 	$(POST_PROCESS_DEPS)
 
-$(KEEP_DIR)/edata_always.o: web/edata_always.c
-	g++ $(CFLAGS) $(FLAGS) -c -o $@ $<
+$(KEEP_DIR)/edata_always.o: $(EDATA_ALWAYS)
+	$(CPP) $(V) $(VIS_UNOPT) @$(MF_INC) -c -o $@ $<
 	$(POST_PROCESS_DEPS)
 
-$(OBJ_DIR)/ext_init.o: extensions/ext_init.c
-	g++ $(CFLAGS) $(FLAGS) -c -o $@ $<
+$(OBJ_DIR)/ext_init.o: $(GEN_DIR)/ext_init.cpp
+	$(CPP) $(V) $(VIS_UNOPT) @$(MF_INC) -c -o $@ $<
 	$(POST_PROCESS_DEPS)
 
-$(KEEP_DIR):
-	@mkdir -p $(KEEP_DIR)
 
-$(OBJ_DIR)/%.o: %.c $(SRC_DEPS)
-#	g++ -x c $(CFLAGS) $(FLAGS) -c -o $@ $<
-	g++ $(CFLAGS) $(FLAGS) -c -o $@ $<
-	@expr `cat .comp_ctr` + 1 >.comp_ctr
-	$(POST_PROCESS_DEPS)
+# .c
 
-$(OBJ_DIR_O3)/%.o: %.c $(SRC_DEPS)
-	g++ -O3 $(CFLAGS) $(FLAGS) -c -o $@ $<
-	@expr `cat .comp_ctr` + 1 >.comp_ctr
-	$(POST_PROCESS_DEPS)
+#$(OBJ_DIR)/%.o: %.c $(SRC_DEPS)
+#	$(CC) -x c $(V) $(VIS_UNOPT) @$(MF_INC) -c -o $@ $<
+#	$(CC) $(V) $(VIS_UNOPT) @$(MF_INC) -c -o $@ $<
+#	@expr `cat $(COMP_CTR)` + 1 >$(COMP_CTR)
+#	$(POST_PROCESS_DEPS)
 
-$(OBJ_DIR)/%.o: %.cpp $(SRC_DEPS)
-	g++ $(CFLAGS) $(FLAGS) -c -o $@ $<
-	@expr `cat .comp_ctr` + 1 >.comp_ctr
-	$(POST_PROCESS_DEPS)
+#$(OBJ_DIR_O3)/%.o: %.c $(SRC_DEPS)
+#	$(CC) $(V) $(VIS_OPT) @$(MF_INC) -c -o $@ $<
+#	@expr `cat $(COMP_CTR)` + 1 >$(COMP_CTR)
+#	$(POST_PROCESS_DEPS)
+
+
+# .cpp $(CFLAGS_UNSAFE_OPT)
 
 $(OBJ_DIR_O3)/search.o: search.cpp $(SRC_DEPS)
-	g++ -O3 $(CFLAGS) $(CFLAGS_UNSAFE_OPT) $(FLAGS) -c -o $@ $<
-	@expr `cat .comp_ctr` + 1 >.comp_ctr
+	$(CPP) $(V) $(VIS_OPT) $(CFLAGS_UNSAFE_OPT) @$(MF_INC) -c -o $@ $<
+#	@expr `cat $(COMP_CTR)` + 1 >$(COMP_CTR)
 	$(POST_PROCESS_DEPS)
 
 $(OBJ_DIR_O3)/simd.o: simd.cpp $(SRC_DEPS)
-	g++ -O3 $(CFLAGS) $(CFLAGS_UNSAFE_OPT) $(FLAGS) -c -o $@ $<
-	@expr `cat .comp_ctr` + 1 >.comp_ctr
+	$(CPP) $(V) $(VIS_OPT) $(CFLAGS_UNSAFE_OPT) @$(MF_INC) -c -o $@ $<
+#	@expr `cat $(COMP_CTR)` + 1 >$(COMP_CTR)
+	$(POST_PROCESS_DEPS)
+
+
+# .cpp
+
+$(OBJ_DIR)/%.o: %.cpp $(SRC_DEPS)
+	$(CPP) $(V) $(VIS_UNOPT) @$(MF_INC) -c -o $@ $<
+#	@expr `cat $(COMP_CTR)` + 1 >$(COMP_CTR)
+	$(POST_PROCESS_DEPS)
+
+$(KEEP_DIR)/%.o: %.cpp $(SRC_DEPS)
+	$(CPP) $(V) $(VIS_OPT) @$(MF_INC) -c -o $@ $<
+#	@expr `cat $(COMP_CTR)` + 1 >$(COMP_CTR)
 	$(POST_PROCESS_DEPS)
 
 $(OBJ_DIR_O3)/%.o: %.cpp $(SRC_DEPS)
-	g++ -O3 $(CFLAGS) $(FLAGS) -c -o $@ $<
-	@expr `cat .comp_ctr` + 1 >.comp_ctr
+	$(CPP) $(V) $(VIS_OPT) @$(MF_INC) -c -o $@ $<
+#	@expr `cat $(COMP_CTR)` + 1 >$(COMP_CTR)
 	$(POST_PROCESS_DEPS)
+
+
+$(KEEP_DIR):
+	@mkdir -p $(KEEP_DIR)
 
 $(OBJ_DIR):
 	@mkdir -p $(OBJ_DIR)
@@ -366,8 +747,63 @@ $(OBJ_DIR):
 $(OBJ_DIR_O3):
 	@mkdir -p $(OBJ_DIR_O3)
 
-KiwiSDR.bit:
-	rsync -av $(V_DIR)/KiwiSDR.bit .
+$(GEN_DIR):
+	@mkdir -p $(GEN_DIR)
+
+$(TOOLS_DIR):
+	@mkdir -p $(TOOLS_DIR)
+
+
+################################
+# installation
+################################
+
+REBOOT = $(DIR_CFG)/.reboot
+ifeq ($(DEBIAN_DEVSYS),$(DEVSYS))
+	DO_ONCE =
+else
+	DO_ONCE = $(DIR_CFG)/.do_once.dep
+endif
+
+$(DO_ONCE):
+ifeq ($(BBAI),true)
+	@echo "disable window system"
+	systemctl stop lightdm.service
+	systemctl disable lightdm.service
+	make install_kiwi_device_tree
+endif
+	@mkdir -p $(DIR_CFG)
+	@touch $(DO_ONCE)
+
+ifeq ($(BBAI),true)
+DIR_DTB = dtb-$(SYS_MAJ).$(SYS_MIN)-ti
+install_kiwi_device_tree:
+	@echo "install Kiwi device tree to configure GPIO pins"
+	@echo $(SYS_MAJ).$(SYS_MIN) $(SYS)
+	cp platform/beaglebone_AI/am5729-beagleboneai-kiwisdr-cape.dts /opt/source/$(DIR_DTB)/src/arm
+	(cd /opt/source/$(DIR_DTB); make)
+	cp /opt/source/dtb-4.14-ti/src/arm/am5729-beagleboneai-kiwisdr-cape.dtb /boot/dtbs/$(SYS)
+	cp /opt/source/dtb-4.14-ti/src/arm/am5729-beagleboneai-kiwisdr-cape.dtb /boot/dtbs/$(SYS)/am5729-beagleboneai.dtb
+	@touch $(REBOOT)
+endif
+
+V_DIR = ~/shared/shared
+
+ifeq ($(DEBIAN_DEVSYS),$(DEVSYS))
+
+KiwiSDR.rx4.wf4.bit: $(V_DIR)/KiwiSDR.rx4.wf4.bit
+	rsync -av $(V_DIR)/KiwiSDR.rx4.wf4.bit .
+
+KiwiSDR.rx8.wf2.bit: $(V_DIR)/KiwiSDR.rx8.wf2.bit
+	rsync -av $(V_DIR)/KiwiSDR.rx8.wf2.bit .
+
+KiwiSDR.rx3.wf3.bit: $(V_DIR)/KiwiSDR.rx3.wf3.bit
+	rsync -av $(V_DIR)/KiwiSDR.rx3.wf3.bit .
+
+KiwiSDR.rx14.wf0.bit: $(V_DIR)/KiwiSDR.rx14.wf0.bit
+	rsync -av $(V_DIR)/KiwiSDR.rx14.wf0.bit .
+
+endif
 
 DEV = kiwi
 CAPE = cape-bone-$(DEV)-00A0
@@ -376,44 +812,52 @@ PRU  = cape-bone-$(DEV)-P-00A0
 
 DIR_CFG_SRC = unix_env/kiwi.config
 
-EXISTS_BASHRC_LOCAL = $(shell test -f ~root/.bashrc.local; echo $$?)
+EXISTS_BASHRC_LOCAL = $(shell test -f ~root/.bashrc.local && echo true)
 
 CFG_KIWI = kiwi.json
-EXISTS_KIWI = $(shell test -f $(DIR_CFG)/$(CFG_KIWI); echo $$?)
+EXISTS_KIWI = $(shell test -f $(DIR_CFG)/$(CFG_KIWI) && echo true)
 
 CFG_ADMIN = admin.json
-EXISTS_ADMIN = $(shell test -f $(DIR_CFG)/$(CFG_ADMIN); echo $$?)
+EXISTS_ADMIN = $(shell test -f $(DIR_CFG)/$(CFG_ADMIN) && echo true)
 
 CFG_CONFIG = config.js
-EXISTS_CONFIG = $(shell test -f $(DIR_CFG)/$(CFG_CONFIG); echo $$?)
+EXISTS_CONFIG = $(shell test -f $(DIR_CFG)/$(CFG_CONFIG) && echo true)
 
 CFG_DX = dx.json
-EXISTS_DX = $(shell test -f $(DIR_CFG)/$(CFG_DX); echo $$?)
+EXISTS_DX = $(shell test -f $(DIR_CFG)/$(CFG_DX) && echo true)
 
 CFG_DX_MIN = dx.min.json
-EXISTS_DX_MIN = $(shell test -f $(DIR_CFG)/$(CFG_DX_MIN); echo $$?)
+EXISTS_DX_MIN = $(shell test -f $(DIR_CFG)/$(CFG_DX_MIN) && echo true)
 
-ETC_HOSTS_HAS_KIWI = $(shell grep -qi kiwisdr /etc/hosts; echo $$?)
+ETC_HOSTS_HAS_KIWI = $(shell grep -qi kiwisdr /etc/hosts && echo true)
+
+SSH_KEYS = /root/.ssh/authorized_keys
+EXISTS_SSH_KEYS = $(shell test -f $(SSH_KEYS) && echo true)
 
 # Only do a 'make install' on the target machine (not needed on the development machine).
 # For the Beagle this installs the device tree files in the right place and other misc stuff.
-install: $(LIBS_DEP) $(ALL_DEPS) kiwid.bin
+# DANGER: do not use $(MAKE_ARGS) here! The targets for building $(EMBED_DEPS) must be run sequentially
+
+.PHONY: install
+install: c_ext_clang_conv
+	@# don't use MAKE_ARGS here!
+	@make c_ext_clang_conv_install
+
+.PHONY: c_ext_clang_conv_install
+c_ext_clang_conv_install: $(DO_ONCE) $(BUILD_DIR)/kiwid.bin
 ifeq ($(DEBIAN_DEVSYS),$(DEVSYS))
-	@echo only run \'make install\' on target
+	@echo remainder of \'make install\' only makes sense to run on target
 else
-	@echo $(C_CTR_INSTALL) >.comp_ctr
-	cp kiwid.bin kiwid
-	cp e_cpu/kiwi.aout kiwid.aout
-#	cp pru/pru_realtime.bin kiwid_realtime.bin
-	cp KiwiSDR.bit KiwiSDRd.bit
-	cp pkgs/noip2/noip2 noip2
-	cp pkgs/frp/frpc frpc
+	@echo $(C_CTR_INSTALL) >$(COMP_CTR)
 # don't strip symbol table while we're debugging daemon crashes
-#	install -D -s -o root -g root kiwid /usr/local/bin/kiwid
-	install -D -o root -g root kiwid /usr/local/bin/kiwid
-	install -D -o root -g root kiwid.aout /usr/local/bin/kiwid.aout
-#	install -D -o root -g root kiwid_realtime.bin /usr/local/bin/kiwid_realtime.bin
-	install -D -o root -g root KiwiSDR.bit /usr/local/bin/KiwiSDRd.bit
+#	install -D -s -o root -g root $(BUILD_DIR)/kiwid.bin /usr/local/bin/kiwid
+	install -D -o root -g root $(BUILD_DIR)/kiwid.bin /usr/local/bin/kiwid
+	install -D -o root -g root $(GEN_DIR)/kiwi.aout /usr/local/bin/kiwid.aout
+#	install -D -o root -g root $(GEN_DIR)/kiwi_realtime.bin /usr/local/bin/kiwid_realtime.bin
+	install -D -o root -g root KiwiSDR.rx4.wf4.bit /usr/local/bin/KiwiSDR.rx4.wf4.bit
+	install -D -o root -g root KiwiSDR.rx8.wf2.bit /usr/local/bin/KiwiSDR.rx8.wf2.bit
+	install -D -o root -g root KiwiSDR.rx3.wf3.bit /usr/local/bin/KiwiSDR.rx3.wf3.bit
+	install -D -o root -g root KiwiSDR.rx14.wf0.bit /usr/local/bin/KiwiSDR.rx14.wf0.bit
 #
 	install -o root -g root unix_env/kiwid /etc/init.d
 	install -o root -g root -m 0644 unix_env/kiwid.service /etc/systemd/system
@@ -421,69 +865,87 @@ else
 	install -D -o root -g root -m 0644 unix_env/$(SPI).dts /lib/firmware/$(SPI).dts
 	install -D -o root -g root -m 0644 unix_env/$(PRU).dts /lib/firmware/$(PRU).dts
 #
-	install -D -o root -g root noip2 /usr/local/bin/noip2
+	install -D -o root -g root $(GEN_DIR)/noip2 /usr/local/bin/noip2
 #
 	install -D -o root -g root -m 0644 $(DIR_CFG_SRC)/frpc.template.ini $(DIR_CFG)/frpc.template.ini
-	install -D -o root -g root frpc /usr/local/bin/frpc
-	rm -f kiwid kiwid.aout kiwid_realtime.bin KiwiSDRd.bit noip2 frpc
+	install -D -o root -g root pkgs/frp/frpc /usr/local/bin/frpc
 #
 	install -D -o root -g root -m 0644 unix_env/bashrc ~root/.bashrc
 	install -D -o root -g root -m 0644 unix_env/profile ~root/.profile
+#
+	install -D -o root -g root -m 0644 unix_env/gdbinit ~root/.gdbinit
+	install -D -o root -g root -m 0644 unix_env/gdb_break ~root/.gdb_break
+	install -D -o root -g root -m 0644 unix_env/gdb_valgrind ~root/.gdb_valgrind
+#
+	install -D -o root -g root -m 0644 $(DIR_CFG_SRC)/v.sed $(DIR_CFG)/v.sed
+#
+	rsync -av --delete $(DIR_CFG_SRC)/samples/ $(DIR_CFG)/samples
 
-# only install config files if they've never existed before
-ifeq ($(EXISTS_BASHRC_LOCAL),1)
+# only install post-customized config files if they've never existed before
+ifneq ($(EXISTS_BASHRC_LOCAL),true)
 	@echo installing .bashrc.local
 	cp unix_env/bashrc.local ~root/.bashrc.local
 endif
 
-ifeq ($(EXISTS_KIWI),1)
+ifneq ($(EXISTS_KIWI),true)
 	@echo installing $(DIR_CFG)/$(CFG_KIWI)
 	@mkdir -p $(DIR_CFG)
 	cp $(DIR_CFG_SRC)/dist.$(CFG_KIWI) $(DIR_CFG)/$(CFG_KIWI)
 
 # don't prevent admin.json transition process
-ifeq ($(EXISTS_ADMIN),1)
+ifneq ($(EXISTS_ADMIN),true)
 	@echo installing $(DIR_CFG)/$(CFG_ADMIN)
 	@mkdir -p $(DIR_CFG)
 	cp $(DIR_CFG_SRC)/dist.$(CFG_ADMIN) $(DIR_CFG)/$(CFG_ADMIN)
 endif
 endif
 
-ifeq ($(EXISTS_DX),1)
+ifneq ($(EXISTS_DX),true)
 	@echo installing $(DIR_CFG)/$(CFG_DX)
 	@mkdir -p $(DIR_CFG)
 	cp $(DIR_CFG_SRC)/dist.$(CFG_DX) $(DIR_CFG)/$(CFG_DX)
 endif
 
-ifeq ($(EXISTS_DX_MIN),1)
+ifneq ($(EXISTS_DX_MIN),true)
 	@echo installing $(DIR_CFG)/$(CFG_DX_MIN)
 	@mkdir -p $(DIR_CFG)
 	cp $(DIR_CFG_SRC)/dist.$(CFG_DX_MIN) $(DIR_CFG)/$(CFG_DX_MIN)
 endif
 
-ifeq ($(EXISTS_CONFIG),1)
+ifneq ($(EXISTS_CONFIG),true)
 	@echo installing $(DIR_CFG)/$(CFG_CONFIG)
 	@mkdir -p $(DIR_CFG)
 	cp $(DIR_CFG_SRC)/dist.$(CFG_CONFIG) $(DIR_CFG)/$(CFG_CONFIG)
 endif
 
-ifeq ($(ETC_HOSTS_HAS_KIWI),1)
+ifneq ($(ETC_HOSTS_HAS_KIWI),true)
 	@echo appending kiwisdr to /etc/hosts
 	@echo '127.0.0.1       kiwisdr' >>/etc/hosts
 endif
 
 	systemctl enable kiwid.service
-	@echo $(C_CTR_DONE) >.comp_ctr
+	@echo $(C_CTR_DONE) >$(COMP_CTR)
 
 # remove public keys leftover from development
-	@-sed -i -e '/.*jks-/d' /root/.ssh/authorized_keys
+ifeq ($(EXISTS_SSH_KEYS),true)
+	@-sed -i -e '/.*jks-/d' $(SSH_KEYS)
 endif
 
+# must be last obviously
+	@if [ -f $(REBOOT) ]; then rm $(REBOOT); echo "MUST REBOOT FOR CHANGES TO TAKE EFFECT"; echo -n "Press \"return\" key to reboot else control-C: "; read in; reboot; fi;
+
+endif
+
+
+################################
+# operation
+################################
 ifeq ($(DEBIAN_DEVSYS),$(DEBIAN))
 
 enable disable start stop restart status:
 	-systemctl --full --lines=100 $@ kiwid.service || true
 
+# SIGUSR1 == SIG_DUMP
 reload dump:
 	-killall -q -s USR1 kiwid
 	-killall -q -s USR1 kiwi.bin
@@ -508,6 +970,9 @@ log:
 
 slog:
 	-@cat /var/log/user.log | grep kiwid
+
+tlog:
+	-@cat /var/log/user.log | grep kiwid | tail -500
 
 syslog:
 	tail -n 1000 -f /var/log/syslog
@@ -536,19 +1001,19 @@ v ver version:
 	@echo "you are running version" $(VER)
 
 # workaround for sites having problems with git using https (even when curl with https works fine)
-OPT_GIT_USE_HTTPS = $(shell test -f /root/kiwi.config/opt.git_no_https; echo $$?)
-ifeq ($(OPT_GIT_USE_HTTPS),1)
-	PROTO = https
+OPT_GIT_NO_HTTPS = $(shell test -f /root/kiwi.config/opt.git_no_https && echo true)
+ifeq ($(OPT_GIT_NO_HTTPS),true)
+	GIT_PROTO = git
 else
-	PROTO = git
+	GIT_PROTO = https
 endif
 
 # invoked by update process -- alter with care!
 git:
-	# remove local changes from development activities before the pull
+	@# remove local changes from development activities before the pull
 	git clean -fd
 	git checkout .
-	git pull -v $(PROTO)://github.com/jks-prv/Beagle_SDR_GPS.git
+	git pull -v $(GIT_PROTO)://github.com/jks-prv/Beagle_SDR_GPS.git
 
 update_check:
 	curl --silent --ipv4 --show-error --connect-timeout 15 https://raw.githubusercontent.com/jks-prv/Beagle_SDR_GPS/master/Makefile -o Makefile.1
@@ -558,24 +1023,30 @@ force_update:
 	touch $(MAKEFILE_DEPS)
 	make
 
+
+################################
+# development
+################################
 dump_eeprom:
 	@echo KiwiSDR cape EEPROM:
-ifeq ($(DEBIAN_7),1)
+ifeq ($(DEBIAN_7),true)
 	hexdump -C /sys/bus/i2c/devices/1-0054/eeprom
 else
+ifeq ($(BBAI),true)
+	hexdump -C /sys/bus/i2c/devices/3-0054/eeprom
+else
 	hexdump -C /sys/bus/i2c/devices/2-0054/eeprom
+endif
 endif
 	@echo
 	@echo BeagleBone EEPROM:
 	hexdump -C /sys/bus/i2c/devices/0-0050/eeprom
 
-DIST = kiwi
 REPO = https://github.com/jks-prv/$(REPO_NAME).git
-V_DIR = ~/shared/shared
 
 # selectively transfer files to the target so everything isn't compiled each time
-EXCLUDE_RSYNC = ".git" "/obj" "/obj_O3" "/obj_keep" "*.dSYM" "*.bin" "*.aout" "e_cpu/a" "*.aout.h" "kiwi.gen.h" \
-	"verilog/kiwi.gen.vh" "web/edata*.c" ".comp_ctr" "extensions/ext_init.c" "pkgs/noip2/noip2" "node_modules" "morse-pro-compiled.js"
+EXCLUDE_RSYNC = ".DS_Store" ".git" "/obj" "/obj_O3" "/obj_keep" "*.dSYM" "*.bin" "*.aout" "e_cpu/a" "*.aout.h" "kiwi.gen.h" \
+	"verilog/kiwi.gen.vh" "web/edata*" "node_modules" "morse-pro-compiled.js"
 RSYNC_ARGS = -av --delete $(addprefix --exclude , $(EXCLUDE_RSYNC)) . root@$(HOST):~root/$(REPO_NAME)
 RSYNC = rsync $(RSYNC_ARGS)
 RSYNC_PORT = rsync -e "ssh -p $(PORT) -l root" $(RSYNC_ARGS)
@@ -585,10 +1056,10 @@ rsync_su:
 rsync_port:
 	sudo $(RSYNC_PORT)
 rsync_bit:
-	rsync -av $(V_DIR)/KiwiSDR.bit .
+	rsync -av $(V_DIR)/KiwiSDR.rx4.wf4.bit $(V_DIR)/KiwiSDR.rx8.wf2.bit $(V_DIR)/KiwiSDR.rx3.wf3.bit $(V_DIR)/KiwiSDR.rx14.wf0.bit .
 	sudo $(RSYNC)
 rsync_bit_port:
-	rsync -av $(V_DIR)/KiwiSDR.bit .
+	rsync -av $(V_DIR)/KiwiSDR.rx4.wf4.bit $(V_DIR)/KiwiSDR.rx8.wf2.bit $(V_DIR)/KiwiSDR.rx3.wf3.bit $(V_DIR)/KiwiSDR.rx14.wf0.bit .
 	sudo $(RSYNC_PORT)
 
 ifeq ($(DEBIAN_DEVSYS),$(DEVSYS))
@@ -611,20 +1082,25 @@ cv2:
 
 endif
 
-clean:
+
+# files that have moved to $(BUILD_DIR) that are present in earlier versions (e.g. v1.2)
+clean_deprecated:
+	-rm -rf obj obj_O3 obj_keep kiwi.bin kiwid.bin *.dSYM web/edata*
+	-rm -rf *.dSYM pas extensions/ext_init.cpp kiwi.gen.h kiwid kiwid.aout kiwid_realtime.bin .comp_ctr
+
+clean: clean_deprecated
 	(cd e_cpu; make clean)
 	(cd verilog; make clean)
 	(cd verilog/rx; make clean)
 	(cd tools; make clean)
 	(cd pkgs/noip2; make clean)
-	-rm -rf $(OBJ_DIR) $(OBJ_DIR_O3) $(DIST).bin $(DIST)d.bin *.dSYM ../$(DIST).tgz pas $(addprefix pru/pru_realtime.,bin lst txt) web/edata_embed.c extensions/ext_init.c kiwi.gen.h $(DIST)d $(DIST)d.aout $(DIST)d_realtime.bin .comp_ctr
+	-rm -rf $(addprefix pru/pru_realtime.,bin lst txt) $(TOOLS_DIR)/file_optim
+	# but not $(KEEP_DIR)
+	-rm -rf $(LOG_FILE) $(BUILD_DIR)/kiwi* $(GEN_DIR) $(OBJ_DIR) $(OBJ_DIR_O3)
+	-rm -f Makefile.1
 
-clean_keep:
-	-rm -rf $(KEEP_DIR) web/edata_always.c
-
-clean_dist:
-	make clean
-	make clean_keep
+clean_dist: clean
+	-rm -rf $(BUILD_DIR)
 
 
 # The following support the development process
@@ -637,16 +1113,17 @@ ifeq ($(DEBIAN_DEVSYS),$(DEVSYS))
 
 # used by scgit alias
 copy_to_git:
-	@(echo 'current dir is:'; pwd; git branch)
+	@(echo 'current dir is:'; pwd)
 	@echo
 	@(cd $(GITAPP)/$(REPO_NAME); echo 'repo branch set to:'; pwd; git branch)
-	@echo -n 'are you sure? '
+	@echo '################################'
+	@echo -n 'did you make install to rebuild the optimized files? '
 	@read not_used
 	make clean_dist
 	rsync -av --delete --exclude .git --exclude .DS_Store . $(GITAPP)/$(REPO_NAME)
 
 copy_from_git:
-	@(echo 'current dir is:'; pwd; git branch)
+	@(echo 'current dir is:'; pwd)
 	@echo
 	@(cd $(GITAPP)/$(REPO_NAME); echo 'repo branch set to:'; pwd; git branch)
 	@echo -n 'are you sure? '
@@ -656,25 +1133,20 @@ copy_from_git:
 
 # used by gdiff alias
 gitdiff:
-	diff -br --exclude=.DS_Store --exclude=.git $(GITAPP)/$(REPO_NAME) . || true
+	colordiff -br --exclude=.DS_Store --exclude=.git "--exclude=*.min.*" $(GITAPP)/$(REPO_NAME) . || true
 gitdiff_brief:
-	diff -br --brief --exclude=.DS_Store --exclude=.git $(GITAPP)/$(REPO_NAME) . || true
-
-tar:
-	make clean_dist
-	tar cfz ../../$(DIST).tgz .
+	colordiff -br --brief --exclude=.DS_Store --exclude=.git $(GITAPP)/$(REPO_NAME) . || true
 
 endif
 
 ifeq ($(DEBIAN_DEVSYS),$(DEBIAN))
 
-/usr/bin/xz:
-	apt-get update
+/usr/bin/xz: $(KEYRING)
 	apt-get -y install xz-utils
 
 create_img_from_sd: /usr/bin/xz
-	@echo "--- this takes 45 minutes"
-	@echo "--- be sure to stop KiwiSDR server first to maximize write speed"
+	@echo "--- this takes about an hour"
+	@echo "--- KiwiSDR server will be stopped to maximize write speed"
 	make stop
 	dd if=/dev/mmcblk1 bs=1M iflag=count_bytes count=1G | xz --verbose > ~/KiwiSDR_$(VER)_BBB_Debian_$(DEBIAN_VER).img.xz
 	sha256sum ~/KiwiSDR_$(VER)_BBB_Debian_$(DEBIAN_VER).img.xz

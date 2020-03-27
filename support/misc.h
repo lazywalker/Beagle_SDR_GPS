@@ -21,7 +21,6 @@ Boston, MA  02110-1301, USA.
 
 #include "types.h"
 #include "kiwi.h"
-#include "misc.h"
 #include "printf.h"
 
 #include <sys/file.h>
@@ -48,12 +47,12 @@ u2_t ctrl_get();
 void ctrl_clr_set(u2_t clr, u2_t set);
 void ctrl_positive_pulse(u2_t bits);
 
-union stat_reg_t {
+typedef union {
     u2_t word;
     struct {
         u2_t fpga_id:4, stat_user:4, fpga_ver:4, fw_id:3, ovfl:1;
     };
-};
+} stat_reg_t;
 stat_reg_t stat_get();
 
 u2_t getmem(u2_t addr);
@@ -69,13 +68,18 @@ char *kiwi_authkey();
 void send_msg_buf(conn_t *c, char *s, int slen);
 void send_msg(conn_t *c, bool debug, const char *msg, ...);
 void send_msg_data(conn_t *c, bool debug, u1_t dst, u1_t *bytes, int nbytes);
+void send_msg_data2(conn_t *c, bool debug, u1_t dst, u1_t data2, u1_t *bytes, int nbytes);
 void send_msg_mc(struct mg_connection *mc, bool debug, const char *msg, ...);
 void send_msg_encoded(conn_t *conn, const char *dst, const char *cmd, const char *fmt, ...);
 void send_msg_mc_encoded(struct mg_connection *mc, const char *dst, const char *cmd, const char *fmt, ...);
 void input_msg_internal(conn_t *conn, const char *fmt, ...);
 
-void print_max_min_stream_i(void **state, const char *name, int index, int nargs, ...);
-void print_max_min_stream_f(void **state, const char *name, int index, int nargs, ...);
+#define P_MAX_MIN_DEMAND    0x00
+#define P_MAX_MIN_RANGE     0x01
+#define P_MAX_MIN_DUMP      0x02
+
+void print_max_min_stream_i(void **state, int flags, const char *name, int index, int nargs, ...);
+void print_max_min_stream_f(void **state, int flags, const char *name, int index, int nargs, ...);
 void print_max_min_u1(const char *name, u1_t *data, int len);
 void print_max_min_i(const char *name, int *data, int len);
 void print_max_min_f(const char *name, float *data, int len);
@@ -112,3 +116,7 @@ typedef struct {
 
 void grid_to_latLon(char *grid, latLon_t *loc);
 int latLon_to_grid6(latLon_t *loc, char *grid);
+
+void set_cpu_affinity(int cpu);
+
+u4_t pos_wrap_diff(u4_t next, u4_t prev, u4_t size);

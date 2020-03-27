@@ -78,7 +78,7 @@ JNX.prototype.setup_values = function(sample_rate, center_frequency_f, shift_Hz,
    t.baud_rate = (t.baud_rate < 10) ? 10 : t.baud_rate;
    t.bit_duration_seconds = 1.0 / t.baud_rate;
    t.bit_sample_count = Math.floor(t.sample_rate * t.bit_duration_seconds + 0.5);
-   //console.log('JNX bit_sample_count='+ t.bit_sample_count);
+   //console.log('JNX bit_sample_count='+ t.bit_sample_count +' sr+bds='+ (t.sample_rate * t.bit_duration_seconds));
    t.half_bit_sample_count = t.bit_sample_count / 2;
    
    t.framing = framing;
@@ -100,7 +100,7 @@ JNX.prototype.setup_values = function(sample_rate, center_frequency_f, shift_Hz,
 
    switch(encoding) {
    
-      case 'ITU2':
+      case 'ITA2':
       case 'ASCII':
       default:
          t.encoding = new FSK_async(framing, encoding);
@@ -118,7 +118,6 @@ JNX.prototype.setup_values = function(sample_rate, center_frequency_f, shift_Hz,
    t.pulse_edge_event = false;
    t.error_count = 0;
    t.valid_count = 0;
-   t.sample_interval = 1.0 / t.sample_rate;
    t.bbuffer = [];
    t.out_buffer = [];
    t.sbuffer = [];
@@ -196,7 +195,6 @@ JNX.prototype.process_data = function(samps, nsamps) {
    
    for (var i = 0; i < nsamps; i++) {
       var dv = samps[i];
-      t.time_sec = t.sample_count * t.sample_interval;
 
       // separate mark and space by narrow filtering
       _mark_level = t.biquad_mark.filter(dv);
@@ -268,7 +266,7 @@ JNX.prototype.process_data = function(samps, nsamps) {
                       // sync_delta is a temporary value that is
                       // used once, then reset to zero
                       t.sync_delta = _index;
-                      t.sync_delta = 0;
+                      //t.sync_delta = 0;
                       // baud_error is persistent -- used by baud error label
                       t.baud_error = _index;
                       t.baud_error_cb(t.baud_error);
@@ -427,6 +425,7 @@ JNX.prototype.process_data = function(samps, nsamps) {
                   t.bit_count = 0;
                   t.valid_count++;
                   if (t.dbg) console.log("SYNC2 OK: valid_count="+ t.valid_count +' sync_chars.len='+ t.sync_chars.length);
+
                   // successfully read 4 characters?
                   if (t.valid_count == 4) {
                      for (var k=0; k < t.sync_chars.length; k++) {

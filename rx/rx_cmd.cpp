@@ -20,21 +20,23 @@ Boston, MA  02110-1301, USA.
 #include "types.h"
 #include "config.h"
 #include "kiwi.h"
+#include "rx.h"
 #include "clk.h"
 #include "misc.h"
 #include "str.h"
 #include "printf.h"
 #include "timer.h"
 #include "web.h"
-#include "peri.h"
 #include "spi.h"
 #include "gps.h"
 #include "cfg.h"
 #include "coroutines.h"
 #include "net.h"
 #include "debug.h"
+#include "ext_int.h"
+#include "wspr.h"
 
-#if RX_CHANS
+#ifndef CFG_GPS_ONLY
  #include "data_pump.h"
  #include "dx.h"
 #endif
@@ -49,24 +51,29 @@ Boston, MA  02110-1301, USA.
 #include <signal.h>
 #include <fftw3.h>
 
-char *cpu_stats_buf;
-volatile float audio_kbps, waterfall_kbps, waterfall_fps[RX_CHANS+1], http_kbps;
-volatile int audio_bytes, waterfall_bytes, waterfall_frames[RX_CHANS+1], http_bytes;
+kstr_t *cpu_stats_buf;
+volatile float audio_kbps[MAX_RX_CHANS+1], waterfall_kbps[MAX_RX_CHANS+1], waterfall_fps[MAX_RX_CHANS+1], http_kbps;
+volatile u4_t audio_bytes[MAX_RX_CHANS+1], waterfall_bytes[MAX_RX_CHANS+1], waterfall_frames[MAX_RX_CHANS+1], http_bytes;
 char *current_authkey;
 int debug_v;
 bool auth_su;
 char auth_su_remote_ip[NET_ADDRSTRLEN];
+bool conn_nolocal;
 
-const char *mode_s[N_MODE] = { "am", "amn", "usb", "lsb", "cw", "cwn", "nbfm", "iq" };
-const char *modu_s[N_MODE] = { "AM", "AMN", "USB", "LSB", "CW", "CWN", "NBFM", "IQ" };
+const char *mode_s[N_MODE] = { "am", "amn", "usb", "lsb", "cw", "cwn", "nbfm", "iq", "drm", "usn", "lsn" };
+const char *modu_s[N_MODE] = { "AM", "AMN", "USB", "LSB", "CW", "CWN", "NBFM", "IQ", "DRM", "USN", "LSN" };
+const int mode_hbw[N_MODE] = { 9800/2, 5000/2, 2400/2, 2400/2, 400/2, 60/2, 12000/2, 10000/2, 10000/2, 2100/2, 2100/2 };
+const int mode_offset[N_MODE] = { 0, 0, 1500, -1500, 0, 0, 0, 0, 0, 1350, -1350 };
 
-static struct dx_t *dx_list_first, *dx_list_last;
+#ifndef CFG_GPS_ONLY
+
+static dx_t *dx_list_first, *dx_list_last;
 
 int bsearch_freqcomp(const void *key, const void *elem)
 {
 	dx_t *dx_key = (dx_t *) key, *dx_elem = (dx_t *) elem;
 	float key_freq = dx_key->freq;
-    float elem_freq = dx_elem->freq + (dx_elem->offset / 1000.0);		// carrier plus offset
+    float elem_freq = dx_elem->freq + ((float) dx_elem->offset / 1000.0);		// carrier plus offset
     
     if (key_freq == elem_freq) return 0;
     if (key_freq < elem_freq) {
@@ -79,11 +86,21 @@ int bsearch_freqcomp(const void *key, const void *elem)
     dx_t *dx_elem2 = dx_elem+1;
     if (dx_elem2 < dx_list_last) {
         // there is a following array element to range check with
-        float elem2_freq = dx_elem2->freq + (dx_elem2->offset / 1000.0);		// carrier plus offset
+        float elem2_freq = dx_elem2->freq + ((float) dx_elem2->offset / 1000.0);		// carrier plus offset
         if (key_freq < elem2_freq) return 0;    // key was between without exact match
         return 1;   // key_freq > elem2_freq -> keep looking
     }
     return 0;   // key > last in array so lower is last (degenerate case)
+}
+
+#endif
+
+void rx_common_init(conn_t *conn)
+{
+	conn->keepalive_time = timer_sec();
+
+    if (is_BBAI)
+	    send_msg(conn, true, "MSG is_BBAI");
 }
 
 bool rx_common_cmd(const char *stream_name, conn_t *conn, char *cmd)
@@ -93,16 +110,32 @@ bool rx_common_cmd(const char *stream_name, conn_t *conn, char *cmd)
 	char *sb, *sb2;
 	int slen;
 	
-	if (mc == NULL) return false;
+	if (mc == NULL) {
+	    cprintf(conn, "### cmd but mc is null <%s>\n", cmd);
+	    return false;
+	}
 	
 	NextTask("rx_common_cmd");      // breakup long runs of sequential commands -- sometimes happens at startup
     evLatency(EC_EVENT, EV_RX, 0, "rx_common_cmd", evprintf("%s", cmd));
 	
-	// SECURITY: auth command here is the only one allowed before auth check below
+	if (strcmp(cmd, "SET keepalive") == 0) {
+	    conn->keepalive_time = timer_sec();
+
+        // for STREAM_EXT send a roundtrip keepalive
+	    if (conn->type == STREAM_EXT) {
+            if (conn->ext_rx_chan == -1) return true;
+            ext_send_msg(conn->ext_rx_chan, false, "MSG keepalive");
+	    }
+		conn->keepalive_count++;
+		return true;
+	}
+
+	// SECURITY: auth command here is the only one allowed before auth check below (excluding keepalive above)
 	if (kiwi_str_begins_with(cmd, "SET auth")) {
 	
 		const char *pwd_s = NULL;
 		int cfg_auto_login;
+		const char *uri = rx_streams[conn->type].uri;
 
 		char *type_m = NULL, *pwd_m = NULL, *ipl_m = NULL;
 		n = sscanf(cmd, "SET auth t=%16ms p=%256ms ipl=%256ms", &type_m, &pwd_m, &ipl_m);
@@ -123,8 +156,9 @@ bool rx_common_cmd(const char *stream_name, conn_t *conn, char *cmd)
 		kiwi_str_decode_inplace(ipl_m);
 		//printf("PWD %s pwd %d \"%s\" from %s\n", type_m, slen, pwd_m, conn->remote_ip);
 		
-		bool allow = false, cant_determine = false;
+		bool allow = false, cant_determine = false, cant_login = false, skip_dup_ip_check = false;
 		bool type_kiwi = (type_m != NULL && strcmp(type_m, "kiwi") == 0);
+		bool type_prot = (type_m != NULL && strcmp(type_m, "prot") == 0);
 		bool type_admin = (type_m != NULL && strcmp(type_m, "admin") == 0);
 		
 		bool stream_wf = (conn->type == STREAM_WATERFALL);
@@ -135,7 +169,7 @@ bool rx_common_cmd(const char *stream_name, conn_t *conn, char *cmd)
 		
 		bool bad_type = (stream_snd_or_wf || stream_ext || stream_admin_or_mfg)? false : true;
 		
-		if ((!type_kiwi && !type_admin) || bad_type) {
+		if ((!type_kiwi && !type_prot && !type_admin) || bad_type) {
 			clprintf(conn, "PWD BAD REQ type_m=\"%s\" conn_type=%d from %s\n", type_m, conn->type, conn->remote_ip);
 			send_msg(conn, false, "MSG badp=1");
             free(type_m); free(pwd_m); free(ipl_m);
@@ -150,32 +184,46 @@ bool rx_common_cmd(const char *stream_name, conn_t *conn, char *cmd)
 			return true;
 		}
 		
+		bool check_ip_against_restricted = true;
 		bool check_ip_against_interfaces = true;
+		bool restricted_ip_match = false;
 		isLocal_t isLocal = IS_NOT_LOCAL;
 		bool is_local = false;
         bool log_auth_attempt, pwd_debug;
 
-        #define PWD_DEBUG 0
-        if (PWD_DEBUG) {
+	    #define nwf_cprintf(conn, fmt, ...) \
+		    cprintf(conn, fmt, ## __VA_ARGS__)
+		    //if (!stream_wf) cprintf(conn, fmt, ## __VA_ARGS__)
+
+	    #define pdbug_cprintf(conn, fmt, ...) \
+		    if (pwd_debug) cprintf(conn, fmt, ## __VA_ARGS__)
+        if (debug_printfs) {
             log_auth_attempt = true;
             pwd_debug = true;
         } else {
             log_auth_attempt = (stream_admin_or_mfg || (stream_ext && type_admin));
             pwd_debug = false;
         }
+        
+        if (conn->internal_connection) {
+            isLocal = IS_LOCAL;
+            is_local = true;
+            check_ip_against_interfaces = check_ip_against_restricted = false;
+        }
 
 		int fd;
-		if (type_admin && (fd = open(DIR_CFG "/opt.admin_ip", O_RDONLY)) != 0) {
+		if (type_admin && check_ip_against_restricted && (fd = open(DIR_CFG "/opt.admin_ip", O_RDONLY)) != -1) {
 		    char admin_ip[NET_ADDRSTRLEN];
 		    n = read(fd, admin_ip, NET_ADDRSTRLEN);
 		    if (n >= 1) {
-		        admin_ip[n-1] = '\0';
-		        if (admin_ip[n-2] == '\n') admin_ip[n-2] = '\0';
+		        admin_ip[n] = '\0';
+		        if (admin_ip[n-1] == '\n') admin_ip[n-1] = '\0';
 		        if (isLocal_ip(admin_ip) && strcmp(ip_remote(mc), admin_ip) == 0) {
 		            isLocal = IS_LOCAL;
 		            is_local = true;
+		            restricted_ip_match = true;
 		        }
-		        cprintf(conn, "PWD opt.admin_ip %s ip=%s\n", is_local? "TRUE":"FALSE", ip_remote(mc));
+		        cprintf(conn, "PWD opt.admin_ip %s\n", restricted_ip_match? "MATCH":"FAIL");
 		        check_ip_against_interfaces = false;
 		    }
 		    close(fd);
@@ -187,37 +235,57 @@ bool rx_common_cmd(const char *stream_name, conn_t *conn, char *cmd)
             // could be spoofed via X-Real-IP / X-Forwarded-For to look like a local address.
             // For a non-local connection mc->remote_ip is 127.0.0.1 when the frp proxy is used
             // so it will never be considered a local connection.
-            isLocal = isLocal_if_ip(conn, ip_remote(mc), (log_auth_attempt || pwd_debug)? "PWD":NULL);
+            isLocal = isLocal_if_ip(conn, ip_remote(mc), (log_auth_attempt || pwd_debug)? "PWD" : NULL);
+
+            if (conn_nolocal) {
+                isLocal = IS_NOT_LOCAL;
+                pwd_debug = true;
+            }
+
+            //#define TEST_NO_LOCAL_IF
+            #ifdef TEST_NO_LOCAL_IF
+                isLocal = NO_LOCAL_IF;
+                pwd_debug = true;
+            #endif
+            
             is_local = (isLocal == IS_LOCAL);
+            check_ip_against_restricted = false;
         }
 
-		if (pwd_debug) cprintf(conn, "PWD %s conn #%d %s isLocal=%d is_local=%d auth=%d auth_kiwi=%d auth_admin=%d from %s\n",
-			type_m, conn->self_idx, streams[conn->type].uri, isLocal, is_local,
-			conn->auth, conn->auth_kiwi, conn->auth_admin, conn->remote_ip);
+		pdbug_cprintf(conn, "PWD %s %s conn #%d isLocal=%d is_local=%d auth=%d auth_kiwi=%d auth_prot=%d auth_admin=%d check_ip_against_restricted=%d restricted_ip_match=%d from %s\n",
+			type_m, uri, conn->self_idx, isLocal, is_local,
+			conn->auth, conn->auth_kiwi, conn->auth_prot, conn->auth_admin, check_ip_against_restricted, restricted_ip_match, conn->remote_ip);
 		
-        if ((inactivity_timeout_mins || ip_limit_mins) && stream_snd) {
-            const char *tlimit_exempt_pwd = cfg_string("tlimit_exempt_pwd", NULL, CFG_OPTIONAL);
+        const char *tlimit_exempt_pwd = admcfg_string("tlimit_exempt_pwd", NULL, CFG_OPTIONAL);
+        //#define TEST_TLIMIT_LOCAL
+        #ifndef TEST_TLIMIT_LOCAL
             if (is_local) {
                 conn->tlimit_exempt = true;
                 cprintf(conn, "TLIMIT exempt local connection from %s\n", conn->remote_ip);
-            } else
-            if (ipl_m != NULL && tlimit_exempt_pwd != NULL && strcasecmp(ipl_m, tlimit_exempt_pwd) == 0) {
-                conn->tlimit_exempt = true;
-                cprintf(conn, "TLIMIT exempt password from %s\n", conn->remote_ip);
             }
-            cfg_string_free(tlimit_exempt_pwd);
+        #endif
+        pdbug_cprintf(conn, "PWD TLIMIT exempt password check: ipl=<%s> tlimit_exempt_pwd=<%s>\n",
+            ipl_m, tlimit_exempt_pwd);
+        if (ipl_m != NULL && tlimit_exempt_pwd != NULL && strcasecmp(ipl_m, tlimit_exempt_pwd) == 0) {
+            conn->tlimit_exempt = true;
+            conn->tlimit_exempt_by_pwd = true;
+            skip_dup_ip_check = true;
+            cprintf(conn, "TLIMIT exempt password from %s\n", conn->remote_ip);
         }
+        cfg_string_free(tlimit_exempt_pwd);
 
         // enforce 24hr ip address connect time limit
         if (ip_limit_mins && stream_snd && !conn->tlimit_exempt) {
-            int ipl_cur_mins = json_default_int(&cfg_ipl, conn->remote_ip, 0, NULL);
+            int ipl_cur_secs = json_default_int(&cfg_ipl, conn->remote_ip, 0, NULL);
+            int ipl_cur_mins = SEC_TO_MINUTES(ipl_cur_secs);
+            //cprintf(conn, "TLIMIT-IP getting database sec:%d for %s\n", ipl_cur_secs, conn->remote_ip);
             if (ipl_cur_mins >= ip_limit_mins) {
                 cprintf(conn, "TLIMIT-IP connecting LIMIT EXCEEDED cur:%d >= lim:%d for %s\n", ipl_cur_mins, ip_limit_mins, conn->remote_ip);
                 send_msg_mc_encoded(mc, "MSG", "ip_limit", "%d,%s", ip_limit_mins, conn->remote_ip);
                 free(type_m); free(pwd_m); free(ipl_m);
+                conn->tlimit_zombie = true;
                 return true;
             } else {
-                conn->ipl_cur_secs = MINUTES_TO_SEC(ipl_cur_mins);
                 cprintf(conn, "TLIMIT-IP connecting LIMIT OKAY cur:%d < lim:%d for %s\n", ipl_cur_mins, ip_limit_mins, conn->remote_ip);
             }
         }
@@ -226,41 +294,63 @@ bool rx_common_cmd(const char *stream_name, conn_t *conn, char *cmd)
 		// Use public ip of Kiwi server when client connection is on local subnet.
 		// This distinction is for the benefit of setting the user's geolocation at short-wave.info
         if (!stream_wf) {
-            char *client_public_ip = (is_local && ddns.pub_valid)? ddns.ip_pub : conn->remote_ip;
+            char *client_public_ip = (is_local && net.pub_valid)? net.ip_pub : conn->remote_ip;
             send_msg(conn, false, "MSG client_public_ip=%s", client_public_ip);
             //cprintf(conn, "client_public_ip %s\n", client_public_ip);
         }
 
 		int chan_no_pwd = cfg_int("chan_no_pwd", NULL, CFG_REQUIRED);
-		int chan_need_pwd = RX_CHANS - chan_no_pwd;
+		if (chan_no_pwd >= rx_chans) chan_no_pwd = rx_chans - 1;
+		int chan_need_pwd = rx_chans - chan_no_pwd;
 
-		if (type_kiwi) {
+		if (type_kiwi || type_prot) {
 			pwd_s = admcfg_string("user_password", NULL, CFG_REQUIRED);
 			bool no_pwd = (pwd_s == NULL || *pwd_s == '\0');
 			cfg_auto_login = admcfg_bool("user_auto_login", NULL, CFG_REQUIRED);
 			
+			// config pwd set, but auto_login for local subnet is true
+			if (cfg_auto_login && is_local) {
+                nwf_cprintf(conn, "PWD %s %s ALLOWED: config pwd set, but is_local and auto-login set\n",
+				    type_m, uri);
+				allow = true;
+				skip_dup_ip_check = true;
+			} else
+
 			// if no user password set allow unrestricted connection
 			if (no_pwd) {
-			    if (!stream_wf)
-				    cprintf(conn, "PWD kiwi ALLOWED: no config pwd set, allow any\n");
+				nwf_cprintf(conn, "PWD %s %s ALLOWED: no config pwd set, allow any (%s)\n",
+				    type_m, uri, conn->remote_ip);
 				allow = true;
 			} else
 			
-			// config pwd set, but auto_login for local subnet is true
-			if (cfg_auto_login && is_local) {
-			    if (!stream_wf)
-				    cprintf(conn, "PWD kiwi ALLOWED: config pwd set, but is_local and auto-login set\n");
+			// internal connections always allowed
+			if (conn->internal_connection) {
+				nwf_cprintf(conn, "PWD %s %s ALLOWED: internal connection\n",
+				    type_m, uri);
 				allow = true;
-			} else {
+				skip_dup_ip_check = true;
+			} else
 			
-				int rx_free = rx_chan_free(NULL);
+			if (!type_prot) {       // consider only if protected mode not requested
+			
+				int rx_free = rx_chan_free_count(RX_COUNT_ALL);
 				
-				// allow with no password if minimum number of channels needing password remains
-				// if no password has been set at all we've already allowed access above
+				// Allow with no password if minimum number of channels needing password remains.
+				// This minimum number is reduced by the number of already privileged connections.
+				// If no password has been set at all we've already allowed access above.
+				int already_privileged_conns = rx_count_server_conns(LOCAL_OR_PWD_PROTECTED_USERS, conn);
+				chan_need_pwd -= already_privileged_conns;
+				if (chan_need_pwd < 0) chan_need_pwd = 0;
+				pdbug_cprintf(conn, "PWD %s %s rx_free=%d >= chan_need_pwd=%d %s already_privileged_conns=%d\n", 
+				    type_m, uri, rx_free, chan_need_pwd,
+				    (rx_free >= chan_need_pwd)? "TRUE":"FALSE", already_privileged_conns);
+				
 				if (rx_free >= chan_need_pwd) {
 					allow = true;
-					//cprintf(conn, "PWD rx_free=%d >= chan_need_pwd=%d %s\n", rx_free, chan_need_pwd, allow? "TRUE":"FALSE");
+			        //nwf_cprintf(conn, "PWD rx_free=%d >= chan_need_pwd=%d %s\n", rx_free, chan_need_pwd, allow? "TRUE":"FALSE");
 				}
+			} else {
+				nwf_cprintf(conn, "PWD %s %s NEED PWD: protected mode requested\n", type_m, uri);
 			}
 		} else
 		
@@ -295,6 +385,12 @@ bool rx_common_cmd(const char *stream_name, conn_t *conn, char *cmd)
 			if (cfg_auto_login && is_local) {
 				clprintf(conn, "PWD %s ALLOWED: config pwd set, but is_local and auto-login set\n", type_m);
 				allow = true;
+			} else
+			
+			// when no admin pwd set, display msg when not on same subnet to aid in debugging
+			if (no_pwd && !is_local) {
+				clprintf(conn, "PWD %s CANT LOGIN: no config pwd set, not is_local\n", type_m);
+				cant_login = true;
 			}
 		} else {
 			cprintf(conn, "PWD bad type=%s\n", type_m);
@@ -310,6 +406,7 @@ bool rx_common_cmd(const char *stream_name, conn_t *conn, char *cmd)
                 printf("PWD %s ALLOWED: by su\n", type_m);
                 allow = true;
                 is_local = true;
+                cant_login = false;
             }
             auth_su = false;        // be certain to reset the global immediately
             memset(auth_su_remote_ip, 0, sizeof(auth_su_remote_ip));
@@ -317,41 +414,79 @@ bool rx_common_cmd(const char *stream_name, conn_t *conn, char *cmd)
 		
 		int badp = 1;
 
-		//clprintf(conn, "PWD %s RESULT pwd_s=<%s> pwd_m=<%s> badp=%d cant_determine=%d allow=%d is_local=%d isLocal(enum)=%d %s\n",
-		//    type_m, pwd_s, pwd_m, badp, cant_determine, allow, is_local, isLocal, conn->remote_ip);
+		pdbug_cprintf(conn, "PWD %s %s RESULT allow=%d pwd_s=<%s> pwd_m=<%s> cant_determine=%d is_local=%d isLocal(enum)=%d %s\n",
+		    type_m, uri, allow, pwd_s, pwd_m, cant_determine, is_local, isLocal, conn->remote_ip);
+
+		if (check_ip_against_restricted && !allow && !restricted_ip_match) {
+		    badp = 3;
+		} else
 
 		if (cant_determine) {
 		    badp = 2;
 		} else
 
+		if (cant_login) {
+		    badp = 4;
+		} else
+
 		if (allow) {
 			if (log_auth_attempt || pwd_debug)
-				clprintf(conn, "PWD %s ALLOWED: from %s\n", type_m, conn->remote_ip);
+				clprintf(conn, "PWD %s %s ALLOWED: from %s\n", type_m, uri, conn->remote_ip);
 			badp = 0;
 		} else
 		
 		if ((pwd_s == NULL || *pwd_s == '\0')) {
-			clprintf(conn, "PWD %s REJECTED: no config pwd set, from %s\n", type_m, conn->remote_ip);
+			clprintf(conn, "PWD %s %s REJECTED: no config pwd set, from %s\n", type_m, uri, conn->remote_ip);
 			badp = 1;
 		} else {
 			if (pwd_m == NULL || pwd_s == NULL) {
-                if (pwd_debug)
-                    cprintf(conn, "PWD %s probably auto-login check, from %s\n", type_m, conn->remote_ip);
+                pdbug_cprintf(conn, "PWD %s %s probably auto-login check, from %s\n", type_m, uri, conn->remote_ip);
 				badp = 1;
 			} else {
 				//cprintf(conn, "PWD CMP %s pwd_s \"%s\" pwd_m \"%s\" from %s\n", type_m, pwd_s, pwd_m, conn->remote_ip);
 				badp = strcasecmp(pwd_m, pwd_s)? 1:0;
-                if (pwd_debug)
-                    cprintf(conn, "PWD %s %s: from %s\n", type_m, badp? "REJECTED":"ACCEPTED", conn->remote_ip);
+                pdbug_cprintf(conn, "PWD %s %s %s:%s from %s\n", type_m, uri, badp? "REJECTED":"ACCEPTED",
+                    type_prot? " (protected login)":"", conn->remote_ip);
+                if (!badp) skip_dup_ip_check = true;    // pwd needed and given correctly so allow dup ip
 			}
 		}
 		
-		send_msg(conn, false, "MSG rx_chans=%d", RX_CHANS);
+        //cprintf(conn, "DUP_IP badp=%d skip_dup_ip_check=%d stream_snd_or_wf=%d\n", badp, skip_dup_ip_check, stream_snd_or_wf);
+        //cprintf(conn, "DUP_IP rx%d %s %s\n", conn->rx_channel, uri, conn->remote_ip);
+        
+        // only SND connection has tlimit_exempt_by_pwd
+        if (stream_wf && conn->other && conn->other->tlimit_exempt_by_pwd) skip_dup_ip_check = true;
+        
+        bool no_dup_ip = admcfg_bool("no_dup_ip", NULL, CFG_REQUIRED);
+        bool skip_admin = (type_admin && allow);
+		if (no_dup_ip && !skip_admin && badp == 0 && !skip_dup_ip_check && stream_snd_or_wf) {
+            conn_t *c = conns;
+            //cprintf(conn, "DUP_IP NEW rx%d %s %s\n", conn->rx_channel, uri, conn->remote_ip);
+            for (i=0; i < N_CONNS; i++, c++) {
+                bool snd_wf = (c->type == STREAM_SOUND || c->type == STREAM_WATERFALL);
+                if (!c->valid || c->internal_connection || !snd_wf) continue;
+                if (c->rx_channel == conn->rx_channel) continue;    // skip our own entry
+                //cprintf(conn, "DUP_IP CHK rx%d %s %s\n", c->rx_channel, rx_streams[c->type].uri, c->remote_ip);
+                if (strcmp(conn->remote_ip, c->remote_ip) == 0) {
+                    //cprintf(conn, "DUP_IP MATCH\n");
+				    badp = 5;
+				    break;
+                }
+            }
+        }
+
+		send_msg(conn, false, "MSG rx_chans=%d", rx_chans);
 		send_msg(conn, false, "MSG chan_no_pwd=%d", chan_no_pwd);
+		if (conn->type == STREAM_SOUND) {
+		    send_msg(conn, false, "MSG is_local=%d,%d", conn->rx_channel, is_local? 1:0);
+            conn_nolocal = false;
+		}
 		send_msg(conn, false, "MSG badp=%d", badp);
 
-        free(type_m); free(pwd_m); free(ipl_m);
+        free(pwd_m); free(ipl_m);
 		cfg_string_free(pwd_s);
+		
+		if (badp == 5) conn->kick = true;
 		
 		// only when the auth validates do we setup the handler
 		if (badp == 0) {
@@ -359,7 +494,8 @@ bool rx_common_cmd(const char *stream_name, conn_t *conn, char *cmd)
 		    // It's possible for both to be set e.g. auth_kiwi set on initial user connection
 		    // then correct admin pwd given later for label edit.
 		    
-			if (type_kiwi) conn->auth_kiwi = true;
+			if (type_kiwi || type_prot) conn->auth_kiwi = true;
+			if (type_prot) conn->auth_prot = true;
 
 			if (type_admin) {
 			    conn->auth_admin = true;
@@ -382,21 +518,23 @@ bool rx_common_cmd(const char *stream_name, conn_t *conn, char *cmd)
 				conn->auth = true;
 				conn->isLocal = is_local;
 				
+				if (stream_snd_or_wf || stream_admin_or_mfg) {
+		            send_msg(conn, SM_NO_DEBUG, "MSG version_maj=%d version_min=%d", version_maj, version_min);
+		        }
+
 				// send cfg once to javascript
 				if (stream_snd || stream_admin_or_mfg)
 					rx_server_send_config(conn);
 				
 				// setup stream task first time it's authenticated
-				stream_t *st = &streams[conn->type];
+				rx_stream_t *st = &rx_streams[conn->type];
 				if (st->setup) (st->setup)((void *) conn);
 			}
 		}
-
-		return true;
-	}
-
-	if (strcmp(cmd, "SET keepalive") == 0) {
-		conn->keepalive_count++;
+		pdbug_cprintf(conn, "PWD %s %s AUTH=%d badp=%d auth_kiwi=%d auth_prot=%d auth_admin=%d\n", type_m, uri,
+		     conn->auth, badp, conn->auth_kiwi, conn->auth_prot, conn->auth_admin);
+        free(type_m);
+        
 		return true;
 	}
 
@@ -406,23 +544,10 @@ bool rx_common_cmd(const char *stream_name, conn_t *conn, char *cmd)
 		return true;	// fake that we accepted command so it won't be further processed
 	}
 
-	if (strcmp(cmd, "SET is_admin") == 0) {
-	    assert(conn->auth == true);
-		send_msg(conn, false, "MSG is_admin=%d", conn->auth_admin);
-		return true;
-	}
 
-	if (strcmp(cmd, "SET get_authkey") == 0) {
-		if (conn->auth_admin == false) {
-			cprintf(conn, "get_authkey NO ADMIN AUTH %s\n", conn->remote_ip);
-			return true;
-		}
-		
-		free(current_authkey);
-		current_authkey = kiwi_authkey();
-		send_msg(conn, false, "MSG authkey_cb=%s", current_authkey);
-		return true;
-	}
+////////////////////////////////
+// saved config
+////////////////////////////////
 
 	if (kiwi_str_begins_with(cmd, "SET save_cfg=")) {
 		if (conn->auth_admin == FALSE) {
@@ -430,12 +555,13 @@ bool rx_common_cmd(const char *stream_name, conn_t *conn, char *cmd)
 			return true;	// fake that we accepted command so it won't be further processed
 		}
 
-		char *json = cfg_realloc_json(strlen(cmd), CFG_NONE);	// a little bigger than necessary
+		char *json = (char *) malloc(strlen(cmd) + SPACE_FOR_NULL); // a little bigger than necessary
 		n = sscanf(cmd, "SET save_cfg=%s", json);
 		assert(n == 1);
 		//printf("SET save_cfg=...\n");
 		kiwi_str_decode_inplace(json);
 		cfg_save_json(json);
+		free(json);
 		update_vars_from_config();      // update C copies of vars
 
 		return true;
@@ -452,61 +578,24 @@ bool rx_common_cmd(const char *stream_name, conn_t *conn, char *cmd)
 			return true;	// fake that we accepted command so it won't be further processed
 		}
 
-		char *json = admcfg_realloc_json(strlen(cmd), CFG_NONE);	// a little bigger than necessary
+		char *json = (char *) malloc(strlen(cmd) + SPACE_FOR_NULL); // a little bigger than necessary
 		n = sscanf(cmd, "SET save_adm=%s", json);
 		assert(n == 1);
 		//printf("SET save_adm=...\n");
 		kiwi_str_decode_inplace(json);
 		admcfg_save_json(json);
-		//update_vars_from_config();    // no admin vars need to be updated on save currently
+		free(json);
+		update_vars_from_config();      // update C copies of vars
 		
 		return true;
 	}
 
-#if RX_CHANS
 
-	if (strcmp(cmd, "SET GET_USERS") == 0) {
-		rx_chan_t *rx;
-		bool need_comma = false;
-		sb = (char *) "[";
-		bool isAdmin = (conn->type == STREAM_ADMIN);
-		
-		for (rx = rx_channels, i=0; rx < &rx_channels[RX_CHANS]; rx++, i++) {
-			n = 0;
-			if (rx->busy) {
-				conn_t *c = rx->conn_snd;
-				if (c && c->valid && c->arrived && c->user != NULL) {
-					assert(c->type == STREAM_SOUND);
-					u4_t now = timer_sec();
-					u4_t t = now - c->arrival;
-					u4_t sec = t % 60; t /= 60;
-					u4_t min = t % 60; t /= 60;
-					u4_t hr = t;
-					char *user = c->isUserIP? NULL : kiwi_str_encode(c->user);
-					char *geo = c->geo? kiwi_str_encode(c->geo) : NULL;
-					char *ext = ext_users[i].ext? kiwi_str_encode((char *) ext_users[i].ext->name) : NULL;
-					const char *ip = isAdmin? c->remote_ip : "";
-					asprintf(&sb2, "%s{\"i\":%d,\"n\":\"%s\",\"g\":\"%s\",\"f\":%d,\"m\":\"%s\",\"z\":%d,\"t\":\"%d:%02d:%02d\",\"e\":\"%s\",\"a\":\"%s\"}",
-						need_comma? ",":"", i, user? user:"", geo? geo:"", c->freqHz,
-						kiwi_enum2str(c->mode, mode_s, ARRAY_LEN(mode_s)), c->zoom, hr, min, sec, ext? ext:"", ip);
-					if (user) free(user);
-					if (geo) free(geo);
-					if (ext) free(ext);
-					n = 1;
-				}
-			}
-			if (n == 0) {
-				asprintf(&sb2, "%s{\"i\":%d}", need_comma? ",":"", i);
-			}
-			sb = kstr_cat(sb, kstr_wrap(sb2));
-			need_comma = true;
-		}
+////////////////////////////////
+// dx
+////////////////////////////////
 
-		sb = kstr_cat(sb, "]");
-		send_msg(conn, false, "MSG user_cb=%s", kstr_sp(sb));
-		kstr_free(sb);
-		return true;
-	}
+#ifndef CFG_GPS_ONLY
 
 #define DX_SPACING_ZOOM_THRESHOLD	5
 #define DX_SPACING_THRESHOLD_PX		10
@@ -519,23 +608,22 @@ bool rx_common_cmd(const char *stream_name, conn_t *conn, char *cmd)
 			return true;
 		}
 		
-		if (dx.len == 0) {
-			return true;
-		}
-		
-		float freq;
-		int gid, mkr_off, flags, new_len;
+		float freq = 0;
+		int gid = -999;
+		int low_cut, high_cut, mkr_off, flags, new_len;
+		bool need_sort = false;
 		flags = 0;
 
-		char *text_m, *notes_m;
-		text_m = notes_m = NULL;
-		n = sscanf(cmd, "SET DX_UPD g=%d f=%f o=%d m=%d i=%1024ms n=%1024ms", &gid, &freq, &mkr_off, &flags, &text_m, &notes_m);
-        //printf("DX_UPD [%s]\n", cmd);
-		//printf("DX_UPD n=%d #%d %8.2f 0x%x text=<%s> notes=<%s>\n", n, gid, freq, flags, text_m, notes_m);
+		char *text_m, *notes_m, *params_m;
+		text_m = notes_m = params_m = NULL;
+		n = sscanf(cmd, "SET DX_UPD g=%d f=%f lo=%d hi=%d o=%d m=%d i=%1024ms n=%1024ms p=%1024ms",
+		    &gid, &freq, &low_cut, &high_cut, &mkr_off, &flags, &text_m, &notes_m, &params_m);
+        printf("DX_UPD [%s]\n", cmd);
+		printf("DX_UPD n=%d #%d %8.2f 0x%x text=<%s> notes=<%s> params=<%s>\n", n, gid, freq, flags, text_m, notes_m, params_m);
 
-		if (n != 2 && n != 6) {
-			printf("DX_UPD n=%d\n", n);
-            free(text_m); free(notes_m);
+		if (n != 2 && n != 9) {
+			printf("DX_UPD n=%d ?\n", n);
+            free(text_m); free(notes_m); free(params_m);
 			return true;
 		}
 		
@@ -544,15 +632,21 @@ bool rx_common_cmd(const char *stream_name, conn_t *conn, char *cmd)
 		//  !-1 !-1     modify
 		//  -1  x       add new
 		
+		// dx.len == 0 only applies when adding first entry to empty list
+		if (gid != -1 && dx.len == 0) return true;
+		
+		bool err = false;
 		dx_t *dxp;
 		if (gid >= -1 && gid < dx.len) {
-			if (gid != -1 && freq == -1) {
+			if (n == 2 && gid != -1 && freq == -1) {
 				// delete entry by forcing to top of list, then decreasing size by one before save
 				cprintf(conn, "DX_UPD %s delete entry #%d\n", conn->remote_ip, gid);
 				dxp = &dx.list[gid];
 				dxp->freq = 999999;
 				new_len = dx.len - 1;
-			} else {
+				need_sort = true;
+			} else
+			if (n != 2) {
 				if (gid == -1) {
 					// new entry: add to end of list (in hidden slot), then sort will insert it properly
 					cprintf(conn, "DX_UPD %s adding new entry\n", conn->remote_ip);
@@ -561,87 +655,214 @@ bool rx_common_cmd(const char *stream_name, conn_t *conn, char *cmd)
 					dx.hidden_used = true;
 					dx.len++;
 					new_len = dx.len;
+				    need_sort = true;
 				} else {
 					// modify entry
 					cprintf(conn, "DX_UPD %s modify entry #%d\n", conn->remote_ip, gid);
 					dxp = &dx.list[gid];
 					new_len = dx.len;
+				    if (dxp->freq != freq) {
+                        need_sort = true;
+                    }
+                    else printf("DX_UPD modify but no freq change, so no sort required %f\n", freq);
+
 				}
 				dxp->freq = freq;
+				dxp->low_cut = low_cut;
+				dxp->high_cut = high_cut;
 				dxp->offset = mkr_off;
 				dxp->flags = flags;
+		        dxp->timestamp = utc_time_since_2018() / 60;
 				
-				// remove trailing 'x' transmitted with text and notes fields
+				// remove trailing 'x' transmitted with text, notes and params fields
 				text_m[strlen(text_m)-1] = '\0';
 				notes_m[strlen(notes_m)-1] = '\0';
+				params_m[strlen(params_m)-1] = '\0';
 				
 				// can't use kiwi_strdup because free() must be used later on
-				dxp->ident = strdup(text_m);
-				dxp->notes = strdup(notes_m);
+				free((void *) dxp->ident); dxp->ident = strdup(text_m);
+				free((void *) dxp->ident_s); dxp->ident_s = kiwi_str_decode_inplace(strdup(text_m));
+				free((void *) dxp->notes); dxp->notes = strdup(notes_m);
+				free((void *) dxp->notes_s); dxp->notes_s = kiwi_str_decode_inplace(strdup(notes_m));
+				free((void *) dxp->params); dxp->params = strdup(params_m);
+			} else {
+			    err = true;
 			}
 		} else {
-			printf("DX_UPD: gid %d >= dx.len %d ?\n", gid, dx.len);
+			printf("DX_UPD: gid %d <> dx.len %d ?\n", gid, dx.len);
+			err = true;
 		}
 		
-		// NB: dx.len here, NOT new_len
-		qsort(dx.list, dx.len, sizeof(dx_t), qsort_floatcomp);
-		//printf("DX_UPD after qsort dx.len %d new_len %d top elem f=%.2f\n",
-		//	dx.len, new_len, dx.list[dx.len-1].freq);
-		dx.len = new_len;
-		//NextTask("DX_UPD 1");
-		for (i = 0; i < dx.len; i++) dx.list[i].idx = i;
-		//NextTask("DX_UPD 2");
-		dx_save_as_json();		// FIXME need better serialization
-		//NextTask("DX_UPD 3");
-		dx_reload();
-		send_msg(conn, false, "MSG request_dx_update");	// get client to request updated dx list
+        //#define TMEAS(x) x
+        #define TMEAS(x)
 
-        free(text_m); free(notes_m);
+		if (!err) {
+            // NB: difference between dx.len and new_len
+            dx_prep_list(need_sort, dx.list, dx.len, new_len);
+            //printf("DX_UPD after qsort dx.len %d new_len %d top elem f=%.2f\n",
+            //	dx.len, new_len, dx.list[dx.len - DX_HIDDEN_SLOT].freq);
+                        
+            dx.len = new_len;
+            TMEAS(u4_t start = timer_ms(); printf("DX_UPD START\n");)
+            dx_save_as_json();		// FIXME need better serialization
+            TMEAS(u4_t split = timer_ms(); printf("DX_UPD struct -> json, file write in %.3f sec\n", TIME_DIFF_MS(split, start));)
+
+            #if 1
+                // NB: Don't need to do the time consuming json re-parse since there are no dxcfg_* write routines that
+                // incrementally alter the json struct. The DX_UPD code modifies the dx struct and then regenerates the entire json string
+                // and writes it to the file. In this way the dx struct is acting as a proxy for the json struct, except at server start-up
+                // when the json struct is walked to construct the initial dx struct.
+                // But do need to grow to include a new hidden slot if it was just used by an add.
+                //dx_reload();
+                if (dx.hidden_used) {
+	                dx.list = (dx_t *) kiwi_realloc("dx_list", dx.list, (dx.len + DX_HIDDEN_SLOT) * sizeof(dx_t));
+	                memset(&dx.list[dx.len], 0, sizeof(dx_t));
+	                dx.hidden_used = false;
+                }
+                
+	            dx.json_up_to_date = false;
+            #else
+                dx_reload();
+            #endif
+
+            TMEAS(u4_t now = timer_ms(); printf("DX_UPD DONE reloaded in %.3f/%.3f sec\n", TIME_DIFF_MS(now, split), TIME_DIFF_MS(now, start));)
+            send_msg(conn, false, "MSG request_dx_update");	// get client to request updated dx list
+        }
+
+        free(text_m); free(notes_m); free(params_m);
 		return true;
 	}
 
+	if (kiwi_str_begins_with(cmd, "SET DX_FILTER")) {
+	    char *filter_ident_m, *filter_notes_m;
+		n = sscanf(cmd, "SET DX_FILTER i=%256ms n=%256ms c=%d w=%d g=%d",
+		    &filter_ident_m, &filter_notes_m, &conn->dx_filter_case, &conn->dx_filter_wild, &conn->dx_filter_grep);
+		if (n != 5) return true;
+        // remove trailing 'x' appended to text strings
+        filter_ident_m[strlen(filter_ident_m)-1] = '\0';
+        filter_notes_m[strlen(filter_notes_m)-1] = '\0';
+        free(conn->dx_filter_ident); conn->dx_filter_ident = kiwi_str_decode_inplace(strdup(filter_ident_m));
+        free(conn->dx_filter_notes); conn->dx_filter_notes = kiwi_str_decode_inplace(strdup(filter_notes_m));
+        free(filter_ident_m);
+        free(filter_notes_m);
+        conn->dx_err_preg_ident = conn->dx_err_preg_notes = 0;
+        
+        // compile regexp
+        if (conn->dx_filter_grep) {
+            int cflags = conn->dx_filter_case? REG_NOSUB : (REG_ICASE|REG_NOSUB);
+            if (conn->dx_has_preg_ident) { regfree(&conn->dx_preg_ident); conn->dx_has_preg_ident = false; }
+            if (conn->dx_has_preg_notes) { regfree(&conn->dx_preg_notes); conn->dx_has_preg_notes = false; }
+            if (conn->dx_filter_ident && conn->dx_filter_ident[0] != '\0') {
+                conn->dx_err_preg_ident = regcomp(&conn->dx_preg_ident, conn->dx_filter_ident, cflags);
+                conn->dx_has_preg_ident = !conn->dx_err_preg_ident;
+                if (conn->dx_err_preg_ident) printf("regcomp ident %d\n", conn->dx_err_preg_ident);
+            }
+            if (conn->dx_filter_notes && conn->dx_filter_notes[0] != '\0') {
+                conn->dx_err_preg_notes = regcomp(&conn->dx_preg_notes, conn->dx_filter_notes, cflags);
+                conn->dx_has_preg_notes = !conn->dx_err_preg_notes;
+                if (conn->dx_err_preg_notes) printf("regcomp notes %d\n", conn->dx_err_preg_notes);
+            }
+        }
+        
+        //printf("DX_FILTER setup <%s> <%s> case=%d wild=%d grep=%d\n",
+        //    conn->dx_filter_ident, conn->dx_filter_notes, conn->dx_filter_case, conn->dx_filter_wild, conn->dx_filter_grep);
+        //show_conn("DX FILTER ", conn);
+        send_msg(conn, false, "MSG request_dx_update");	// get client to request updated dx list
+		return true;
+	}
+
+
+    // Called in two different ways:
+    // With 4 params to search for and return labels in the visible area defined by max/min.
+    // With 2 params to search for the next label above or below the visible area when label stepping.
+    // The search criteria applies in both cases.
+    
 	if (kiwi_str_begins_with(cmd, "SET MKR")) {
-		float min, max;
-		int zoom, width;
-		n = sscanf(cmd, "SET MKR min=%f max=%f zoom=%d width=%d", &min, &max, &zoom, &width);
-		if (n != 4) return true;
-		float bw;
-		bw = max - min;
+		float min, max, bw;
+		int zoom, width, dir = 1;
+		int type = sscanf(cmd, "SET MKR min=%f max=%f zoom=%d width=%d", &min, &max, &zoom, &width);
+		if (type != 4) {
+		    type = sscanf(cmd, "SET MKR dir=%d freq=%f", &dir, &min);
+		        if (type != 2) return true;
+		} else {
+		    bw = max - min;
+		}
+		
 		static bool first = true;
 		static int dx_lastx;
 		dx_lastx = 0;
 		
 		if (dx.len == 0) {
+            send_msg(conn, false, "MSG mkr=[{\"t\":4}]");    // otherwise last marker won't get cleared
 			return true;
 		}
 		
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
         u4_t msec = ts.tv_nsec/1000000;
-		asprintf(&sb, "[{\"s\":%ld,\"m\":%d}", ts.tv_sec, msec);   // reset appending
-		sb = kstr_wrap(sb);
+        // reset appending
+		sb = kstr_asprintf(NULL, "[{\"t\":%d,\"s\":%ld,\"m\":%d,\"f\":%d}",
+		    type, ts.tv_sec, msec, (conn->dx_err_preg_ident? 1:0) + (conn->dx_err_preg_notes? 2:0));   
 		int send = 0;
 		
 		// bsearch the lower bound for speed with large lists
 		dx_t dx_min;
+
+        // DX_SEARCH_WINDOW: when zoomed far-in need to look at wider window since we don't know PB center here
 		#define DX_SEARCH_WINDOW 10.0
-		dx_min.freq = min - DX_SEARCH_WINDOW;
+		dx_min.freq = min + ((type == 2 && dir == 1)? DX_SEARCH_WINDOW : -DX_SEARCH_WINDOW);
 		dx_list_first = &dx.list[0];
-		dx_list_last = &dx.list[dx.len-1];      // NB: addr of LAST in list
+		dx_list_last = &dx.list[dx.len - DX_HIDDEN_SLOT];   // NB: addr of LAST in list
+
 		dx_t *dp = (dx_t *) bsearch(&dx_min, dx.list, dx.len, sizeof(dx_t), bsearch_freqcomp);
 		if (dp == NULL) panic("DX bsearch");
 		//printf("DX MKR key=%.2f bsearch=%.2f(%d/%d) min=%.2f max=%.2f\n",
-		//    dx_min.freq, dp->freq + (dp->offset / 1000.0), dp->idx, dx.len, min, max);
+		//    dx_min.freq, dp->freq + ((float) dp->offset / 1000.0), dp->idx, dx.len, min, max);
+		
+		int dx_filter = 0, fn_flags = 0;
+        if (conn->dx_filter_ident || conn->dx_filter_notes) {
+            dx_filter = 1;
+            fn_flags = conn->dx_filter_case? 0 : FNM_CASEFOLD;
+            //printf("DX FILTERING on <%s> <%s> case=%d wild=%d grep=%d\n",
+            //    conn->dx_filter_ident, conn->dx_filter_notes, conn->dx_filter_case, conn->dx_filter_wild, conn->dx_filter_grep);
+            //show_conn("DX FILTER ", conn);
+        }
+        
+		for (; dp < &dx.list[dx.len] && dp >= dx.list; dp += dir) {
+			float freq = dp->freq + ((float) dp->offset / 1000.0);		// carrier plus offset
 
-		for (; dp < &dx.list[dx.len]; dp++) {
-			float freq = dp->freq + (dp->offset / 1000.0);		// carrier plus offset
-
-			// when zoomed far-in need to look at wider window since we don't know PB center here
-			if (freq < min - DX_SEARCH_WINDOW) continue;
-			if (freq > max + DX_SEARCH_WINDOW) break;
+			if (type == 4 && freq > max + DX_SEARCH_WINDOW) break;    // get extra one above for label stepping
+			
+			if (dx_filter) {
+			    if (conn->dx_filter_grep) {
+			        if (conn->dx_has_preg_ident) {
+                        if (regexec(&conn->dx_preg_ident, dp->ident_s, 0, NULL, 0) == REG_NOMATCH) continue;
+                    }
+			        if (conn->dx_has_preg_notes) {
+                        if (regexec(&conn->dx_preg_notes, dp->notes_s, 0, NULL, 0) == REG_NOMATCH) continue;
+                    }
+			        //printf("DX FILTER MATCHED-grep %s<%s> %s<%s>\n",
+			        //    conn->dx_has_preg_ident? "*":"", dp->ident_s, conn->dx_has_preg_notes? "*":"", dp->notes_s);
+			    } else
+			    if (conn->dx_filter_wild) {
+                    if (fnmatch(conn->dx_filter_ident, dp->ident_s, fn_flags) != 0) continue;
+                    if (conn->dx_filter_notes && conn->dx_filter_notes[0] != '\0' &&
+                        fnmatch(conn->dx_filter_notes, dp->notes_s, fn_flags) != 0) continue;
+			        //printf("DX FILTER MATCHED-wild <%s> <%s>\n", dp->ident_s, dp->notes_s);
+			    } else {
+                    if (conn->dx_filter_case) {
+                        if (strstr(dp->ident_s, conn->dx_filter_ident) == NULL) continue;
+                        if (conn->dx_filter_notes && strstr(dp->notes_s, conn->dx_filter_notes) == NULL) continue;
+                    } else {
+                        if (strcasestr(dp->ident_s, conn->dx_filter_ident) == NULL) continue;
+                        if (conn->dx_filter_notes && strcasestr(dp->notes_s, conn->dx_filter_notes) == NULL) continue;
+                    }
+			        //printf("DX FILTER MATCHED-no-grep <%s> <%s>\n", dp->ident_s, dp->notes_s);
+                }
+			}
 			
 			// reduce dx label clutter
-			if (zoom <= DX_SPACING_ZOOM_THRESHOLD) {
+			if (type == 4 && zoom <= DX_SPACING_ZOOM_THRESHOLD) {
 				int x = ((dp->freq - min) / bw) * width;
 				int diff = x - dx_lastx;
 				//printf("DX spacing %d %d %d %s\n", dx_lastx, x, diff, dp->ident);
@@ -650,16 +871,18 @@ bool rx_common_cmd(const char *stream_name, conn_t *conn, char *cmd)
 				first = false;
 			}
 			
-			// NB: ident and notes are already stored URL encoded
-			float f = dp->freq + (dp->offset / 1000.0);
-			asprintf(&sb2, ",{\"g\":%d,\"f\":%.3f,\"o\":%.0f,\"b\":%d,\"i\":\"%s\"%s%s%s}",
-				dp->idx, freq, dp->offset, dp->flags, dp->ident,
-				dp->notes? ",\"n\":\"":"", dp->notes? dp->notes:"", dp->notes? "\"":"");
-			//printf("dx(%d,%.3f,%.0f,%d,\'%s\'%s%s%s)\n", dp->idx, f, dp->offset, dp->flags, dp->ident,
-			//	dp->notes? ",\'":"", dp->notes? dp->notes:"", dp->notes? "\'":"");
-			sb = kstr_cat(sb, kstr_wrap(sb2));
-		    //printf("DX %d: %.2f(%d)\n", send, freq, dp->idx);
-			send++;
+			// NB: ident, notes and params are already stored URL encoded
+			if (type == 4 || dp->freq != min) {
+                sb = kstr_asprintf(sb, ",{\"g\":%d,\"f\":%.3f,\"lo\":%d,\"hi\":%d,\"o\":%d,\"b\":%d,\"ts\":%d,\"tg\":%d,\"i\":\"%s\"%s%s%s%s%s%s}",
+                    dp->idx, freq, dp->low_cut, dp->high_cut, dp->offset, dp->flags, dp->timestamp, dp->tag, dp->ident,
+                    dp->notes? ",\"n\":\"":"", dp->notes? dp->notes:"", dp->notes? "\"":"",
+                    dp->params? ",\"p\":\"":"", dp->params? dp->params:"", dp->params? "\"":"");
+                //printf("DX %d: %.2f(%d)\n", send, freq, dp->idx);
+                send++;
+            }
+			
+			// return the very first we hit that passed the filtering criteria above
+			if (type == 2 && send) break;
 		}
 		
 		sb = kstr_cat(sb, "]");
@@ -668,12 +891,28 @@ bool rx_common_cmd(const char *stream_name, conn_t *conn, char *cmd)
 		//printf("DX send=%d\n", send);
 		return true;
 	}
+	
+	// send the whole database as json
+	if (strcmp(cmd, "SET GET_DX_JSON") == 0) {
+	    dxcfg_update_json();    // update (re-parse) json if necessary
+
+        // NB: ident, notes and params are already stored URL encoded
+        printf("GET_DX_JSON len=%d\n", strlen(cfg_dx.json));
+		send_msg(conn, false, "MSG dx_json=%s", cfg_dx.json);
+		free(sb);
+		return true;
+	}
 
 #endif
 
+
+////////////////////////////////
+// status and config
+////////////////////////////////
+
 	if (strcmp(cmd, "SET GET_CONFIG") == 0) {
 		asprintf(&sb, "{\"r\":%d,\"g\":%d,\"s\":%d,\"pu\":\"%s\",\"pe\":%d,\"pv\":\"%s\",\"pi\":%d,\"n\":%d,\"m\":\"%s\",\"v1\":%d,\"v2\":%d}",
-			RX_CHANS, GPS_CHANS, ddns.serno, ddns.ip_pub, ddns.port_ext, ddns.ip_pvt, ddns.port, ddns.nm_bits, ddns.mac, version_maj, version_min);
+			rx_chans, GPS_CHANS, net.serno, net.ip_pub, net.port_ext, net.ip_pvt, net.port, net.nm_bits, net.mac, version_maj, version_min);
 		send_msg(conn, false, "MSG config_cb=%s", sb);
 		free(sb);
 		return true;
@@ -682,406 +921,222 @@ bool rx_common_cmd(const char *stream_name, conn_t *conn, char *cmd)
 	if (kiwi_str_begins_with(cmd, "SET STATS_UPD")) {
 		int ch;
 		n = sscanf(cmd, "SET STATS_UPD ch=%d", &ch);
-		if (n != 1 || ch < 0 || ch > RX_CHANS) return true;
+		//printf("STATS_UPD ch=%d\n", ch);
+		// ch == rx_chans for admin connections (e.g. 4 when ch = 0..3 for user connections)
+		if (n != 1 || ch < 0 || ch > rx_chans) return true;
 
 		rx_chan_t *rx;
 		int underruns = 0, seq_errors = 0;
-		n = 0;
-		//n = snprintf(oc, rem, "{\"a\":["); oc += n; rem -= n;
 		
-		for (rx = rx_channels, i=0; rx < &rx_channels[RX_CHANS]; rx++, i++) {
+		for (rx = rx_channels, i=0; rx < &rx_channels[rx_chans]; rx++, i++) {
 			if (rx->busy) {
-				conn_t *c = rx->conn_snd;
-				if (c && c->valid && c->arrived && c->user != NULL) {
+				conn_t *c = rx->conn;
+				if (c && c->valid && c->arrived && c->type == STREAM_SOUND && c->user != NULL) {
 					underruns += c->audio_underrun;
 					seq_errors += c->sequence_errors;
 				}
 			}
 		}
 		
-		if (cpu_stats_buf != NULL) {
-			asprintf(&sb, "{%s,", cpu_stats_buf);
-		} else {
-			asprintf(&sb, "{");
-		}
-		sb = kstr_wrap(sb);
+		sb = kstr_asprintf(NULL, cpu_stats_buf? "{%s," : "{", kstr_sp(cpu_stats_buf));
 
-		float sum_kbps = audio_kbps + waterfall_kbps + http_kbps;
-		asprintf(&sb2, "\"aa\":%.0f,\"aw\":%.0f,\"af\":%.0f,\"at\":%.0f,\"ah\":%.0f,\"as\":%.0f",
-			audio_kbps, waterfall_kbps, waterfall_fps[ch], waterfall_fps[RX_CHANS], http_kbps, sum_kbps);
-		sb = kstr_cat(sb, kstr_wrap(sb2));
+		float sum_kbps = audio_kbps[rx_chans] + waterfall_kbps[rx_chans] + http_kbps;
+		sb = kstr_asprintf(sb, "\"ac\":%.0f,\"wc\":%.0f,\"fc\":%.0f,\"ah\":%.0f,\"as\":%.0f,\"sr\":%.6f",
+			audio_kbps[ch], waterfall_kbps[ch], waterfall_fps[ch], http_kbps, sum_kbps,
+			ext_update_get_sample_rateHz(-1));
 
-		asprintf(&sb2, ",\"ga\":%d,\"gt\":%d,\"gg\":%d,\"gf\":%d,\"gc\":%.6f,\"go\":%d",
+		sb = kstr_asprintf(sb, ",\"ga\":%d,\"gt\":%d,\"gg\":%d,\"gf\":%d,\"gc\":%.6f,\"go\":%d",
 			gps.acquiring, gps.tracking, gps.good, gps.fixes, adc_clock_system()/1e6, clk.adc_gps_clk_corrections);
-		sb = kstr_cat(sb, kstr_wrap(sb2));
 
-#if RX_CHANS
-		extern int audio_dropped;
-		asprintf(&sb2, ",\"ad\":%d,\"au\":%d,\"ae\":%d,\"ar\":%d,\"an\":%d,\"ap\":[",
-			audio_dropped, underruns, seq_errors, dpump_resets, NRX_BUFS);
-		sb = kstr_cat(sb, kstr_wrap(sb2));
-		for (i = 0; i < NRX_BUFS; i++) {
-		    asprintf(&sb2, "%s%d", (i != 0)? ",":"", dpump_hist[i]);
-		    sb = kstr_cat(sb, kstr_wrap(sb2));
-		}
-        sb = kstr_cat(sb, "]");
+#ifndef CFG_GPS_ONLY
+        //printf("ch=%d ug=%d lat=%d\n", ch, wspr_c.GPS_update_grid, (gps.StatLat != 0));
+        if (wspr_c.GPS_update_grid && gps.StatLat) {
+            latLon_t loc;
+            loc.lat = gps.sgnLat;
+            loc.lon = gps.sgnLon;
+            char grid6[LEN_GRID];
+            if (latLon_to_grid6(&loc, grid6) == 0) {
+                //#define TEST_GPS_GRID
+                #ifdef TEST_GPS_GRID
+                    static int grid_flip;
+                    grid6[5] = grid_flip? 'j':'i';
+                    if (ch == rx_chans) {
+                        grid_flip = grid_flip ^ 1;
+                        printf("TEST_GPS_GRID %s\n", grid6);
+                    }
+                #endif
+	            kiwi_strncpy(wspr_c.rgrid, grid6, LEN_GRID);
+            }
+        }
+        
+        // Always send WSPR grid. Won't reveal location if grid not set on WSPR admin page
+        // and update-from-GPS turned off.
+        sb = kstr_asprintf(sb, ",\"gr\":\"%s\"", wspr_c.rgrid);
+        //printf("status sending wspr_c.rgrid=<%s>\n", wspr_c.rgrid);
+        
+		sb = kstr_asprintf(sb, ",\"ad\":%d,\"au\":%d,\"ae\":%d,\"ar\":%d,\"an\":%d,\"an2\":%d,",
+			dpump.audio_dropped, underruns, seq_errors, dpump.resets, nrx_bufs, N_DPBUF);
+		sb = kstr_cat(sb, kstr_list_int("\"ap\":[", "%u", "],", (int *) dpump.hist, nrx_bufs));
+		sb = kstr_cat(sb, kstr_list_int("\"ai\":[", "%u", "]", (int *) dpump.in_hist, N_DPBUF));
 #endif
 
-		char *s, utc_s[32], local_s[32];
-		time_t utc; time(&utc);
-		s = asctime(gmtime(&utc));
-		strncpy(utc_s, &s[11], 5);
+		char utc_s[32], local_s[32];
+		time_t utc = utc_time();
+		strncpy(utc_s, &utc_ctime_static()[11], 5);
 		utc_s[5] = '\0';
 		if (utc_offset != -1 && dst_offset != -1) {
 			time_t local = utc + utc_offset + dst_offset;
-			s = asctime(gmtime(&local));
-			strncpy(local_s, &s[11], 5);
+			strncpy(local_s, &var_ctime_static(&local)[11], 5);
 			local_s[5] = '\0';
 		} else {
 			strcpy(local_s, "");
 		}
-		asprintf(&sb2, ",\"tu\":\"%s\",\"tl\":\"%s\",\"ti\":\"%s\",\"tn\":\"%s\"",
+		sb = kstr_asprintf(sb, ",\"tu\":\"%s\",\"tl\":\"%s\",\"ti\":\"%s\",\"tn\":\"%s\"}",
 			utc_s, local_s, tzone_id, tzone_name);
-		sb = kstr_cat(sb, kstr_wrap(sb2));
-
-		asprintf(&sb2, "}");
-		sb = kstr_cat(sb, kstr_wrap(sb2));
 
 		send_msg(conn, false, "MSG stats_cb=%s", kstr_sp(sb));
 		kstr_free(sb);
 		return true;
 	}
 
-	n = strcmp(cmd, "SET gps_update");
-	if (n == 0) {
-		if (conn->auth_admin == false) {
-			cprintf(conn, "SET gps_update: NO ADMIN AUTH %s\n", conn->remote_ip);
-			return true;
-		}
+#ifndef CFG_GPS_ONLY
 
-		if (gps.IQ_seq_w != gps.IQ_seq_r) {
-		    asprintf(&sb, "{\"ch\":%d,\"IQ\":[", 0);
-		    sb = kstr_wrap(sb);
-		    s4_t iq;
-            for (j = 0; j < GPS_IQ_SAMPS*NIQ; j++) {
-                #if GPS_INTEG_BITS == 16
-                    iq = S4(S2(gps.IQ_data[j*2+1]));
-                #else
-                    iq = S32_16_16(gps.IQ_data[j*2], gps.IQ_data[j*2+1]);
-                #endif
-                asprintf(&sb2, "%s%d", j? ",":"", iq);
-                sb = kstr_cat(sb, kstr_wrap(sb2));
-            }
-            sb = kstr_cat(sb, "]}");
-            send_msg_encoded(conn, "MSG", "gps_IQ_data_cb", "%s", kstr_sp(sb));
-            kstr_free(sb);
-		    gps.IQ_seq_r = gps.IQ_seq_w;
-		    NextTask("gps_update1");
-		}
-
-        // sends a list of the last gps.POS_len entries per query
-		if (gps.POS_seq_w != gps.POS_seq_r) {
-		    asprintf(&sb, "{\"ref_lat\":%.6f,\"ref_lon\":%.6f,\"POS\":[", gps.ref_lat, gps.ref_lon);
-		    sb = kstr_wrap(sb);
-		    int xmax[GPS_NPOS], xmin[GPS_NPOS], ymax[GPS_NPOS], ymin[GPS_NPOS];
-		    xmax[0] = xmax[1] = ymax[0] = ymax[1] = INT_MIN;
-		    xmin[0] = xmin[1] = ymin[0] = ymin[1] = INT_MAX;
-            for (j = 0; j < GPS_NPOS; j++) {
-                for (k = 0; k < gps.POS_len; k++) {
-                    asprintf(&sb2, "%s%.6f,%.6f", (j||k)? ",":"", gps.POS_data[j][k].lat, gps.POS_data[j][k].lon);
-                    sb = kstr_cat(sb, kstr_wrap(sb2));
-                    if (gps.POS_data[j][k].lat != 0) {
-                        int x = gps.POS_data[j][k].x;
-                        if (x > xmax[j]) xmax[j] = x; else if (x < xmin[j]) xmin[j] = x;
-                        int y = gps.POS_data[j][k].y;
-                        if (y > ymax[j]) ymax[j] = y; else if (y < ymin[j]) ymin[j] = y;
-                    }
-                }
-            }
-            asprintf(&sb2, "],\"x0span\":%d,\"y0span\":%d,\"x1span\":%d,\"y1span\":%d}",
-                xmax[0]-xmin[0], ymax[0]-ymin[0], xmax[1]-xmin[1], ymax[1]-ymin[1]);
-            sb = kstr_cat(sb, kstr_wrap(sb2));
-            send_msg_encoded(conn, "MSG", "gps_POS_data_cb", "%s", kstr_sp(sb));
-            kstr_free(sb);
-		    gps.POS_seq_r = gps.POS_seq_w;
-		    NextTask("gps_update2");
-		}
-
-        // sends a list of the newest, non-duplicate entries per query
-		if (gps.MAP_seq_w != gps.MAP_seq_r) {
-		    asprintf(&sb, "{\"ref_lat\":%.6f,\"ref_lon\":%.6f,\"MAP\":[", gps.ref_lat, gps.ref_lon);
-		    sb = kstr_wrap(sb);
-            int any_new = 0;
-            for (j = 0; j < GPS_NMAP; j++) {
-                for (k = 0; k < gps.MAP_len; k++) {
-                    u4_t seq = gps.MAP_data[0][k].seq;
-                    if (seq <= gps.MAP_seq_r || gps.MAP_data[j][k].lat == 0) continue;
-                    asprintf(&sb2, "%s{\"seq\":%d,\"nmap\":%d,\"lat\":%.6f,\"lon\":%.6f}", (any_new)? ",":"",
-                        seq, j, gps.MAP_data[j][k].lat, gps.MAP_data[j][k].lon);
-                    sb = kstr_cat(sb, kstr_wrap(sb2));
-                    any_new++;
-                }
-            }
-            sb = kstr_cat(sb, "]}");
-            if (any_new)
-                send_msg_encoded(conn, "MSG", "gps_MAP_data_cb", "%s", kstr_sp(sb));
-            kstr_free(sb);
-		    gps.MAP_seq_r = gps.MAP_seq_w;
-		    NextTask("gps_update3");
-		}
-
-		gps_stats_t::gps_chan_t *c;
-		
-		asprintf(&sb, "{\"FFTch\":%d,\"ch\":[", gps.FFTch);
-		sb = kstr_wrap(sb);
-		
-		for (i=0; i < gps_chans; i++) {
-			c = &gps.ch[i];
-			int prn = -1;
-			char prn_s = 'x';
-			if (c->sat >= 0) {
-			    prn_s = sat_s[Sats[c->sat].type];
-			    prn = Sats[c->sat].prn;
-			}
-			asprintf(&sb2, "%s{\"ch\":%d,\"prn_s\":\"%c\",\"prn\":%d,\"snr\":%d,\"rssi\":%d,\"gain\":%d,\"hold\":%d,\"wdog\":%d"
-				",\"unlock\":%d,\"parity\":%d,\"alert\":%d,\"sub\":%d,\"sub_renew\":%d,\"soln\":%d,\"ACF\":%d,\"novfl\":%d,\"az\":%d,\"el\":%d}",
-				i? ", ":"", i, prn_s, prn, c->snr, c->rssi, c->gain, c->hold, c->wdog,
-				c->ca_unlocked, c->parity, c->alert, c->sub, c->sub_renew, c->soln, c->ACF_mode, c->novfl, c->az, c->el);
-//jks2
-//if(i==3)printf("%s\n", sb2);
-			sb = kstr_cat(sb, kstr_wrap(sb2));
-			c->parity = 0;
-			c->soln = 0;
-			for (j = 0; j < SUBFRAMES; j++) {
-				if (c->sub_renew & (1<<j)) {
-					c->sub |= 1<<j;
-					c->sub_renew &= ~(1<<j);
-				}
-			}
-		    NextTask("gps_update4");
-		}
-
-        asprintf(&sb2, "],\"soln\":%d,\"sep\":%d", gps.soln, gps.E1B_plot_separately);
-		sb = kstr_cat(sb, kstr_wrap(sb2));
-
-		UMS hms(gps.StatSec/60/60);
-		
-		unsigned r = (timer_ms() - gps.start)/1000;
-		if (r >= 3600) {
-			asprintf(&sb2, ",\"run\":\"%d:%02d:%02d\"", r / 3600, (r / 60) % 60, r % 60);
-		} else {
-			asprintf(&sb2, ",\"run\":\"%d:%02d\"", (r / 60) % 60, r % 60);
-		}
-		sb = kstr_cat(sb, kstr_wrap(sb2));
-
-		if (gps.ttff) {
-			asprintf(&sb2, ",\"ttff\":\"%d:%02d\"", gps.ttff / 60, gps.ttff % 60);
-		} else {
-			asprintf(&sb2, ",\"ttff\":null");
-		}
-		sb = kstr_cat(sb, kstr_wrap(sb2));
-
-		if (gps.StatDay != -1) {
-			asprintf(&sb2, ",\"gpstime\":\"%s %02d:%02d:%02.0f\"", Week[gps.StatDay], hms.u, hms.m, hms.s);
-		} else {
-			asprintf(&sb2, ",\"gpstime\":null");
-		}
-		sb = kstr_cat(sb, kstr_wrap(sb2));
-
-		if (gps.tLS_valid) {
-			asprintf(&sb2, ",\"utc_offset\":\"%+d sec\"", gps.delta_tLS);
-		} else {
-			asprintf(&sb2, ",\"utc_offset\":null");
-		}
-		sb = kstr_cat(sb, kstr_wrap(sb2));
-
-		if (gps.StatLat) {
-			//asprintf(&sb2, ",\"lat\":\"%8.6f %c\"", gps.StatLat, gps.StatNS);
-			asprintf(&sb2, ",\"lat\":%.6f", gps.sgnLat);
-			sb = kstr_cat(sb, kstr_wrap(sb2));
-			//asprintf(&sb2, ",\"lon\":\"%8.6f %c\"", gps.StatLon, gps.StatEW);
-			asprintf(&sb2, ",\"lon\":%.6f", gps.sgnLon);
-			sb = kstr_cat(sb, kstr_wrap(sb2));
-			asprintf(&sb2, ",\"alt\":\"%1.0f m\"", gps.StatAlt);
-			sb = kstr_cat(sb, kstr_wrap(sb2));
-			asprintf(&sb2, ",\"map\":\"<a href='http://wikimapia.org/#lang=en&lat=%8.6f&lon=%8.6f&z=18&m=b' target='_blank'>wikimapia.org</a>\"",
-				gps.sgnLat, gps.sgnLon);
-		} else {
-			//asprintf(&sb2, ",\"lat\":null");
-			asprintf(&sb2, ",\"lat\":0");
-		}
-		sb = kstr_cat(sb, kstr_wrap(sb2));
-			
-		asprintf(&sb2, ",\"acq\":%d,\"track\":%d,\"good\":%d,\"fixes\":%d,\"adc_clk\":%.6f,\"adc_corr\":%d}",
-			gps.acquiring? 1:0, gps.tracking, gps.good, gps.fixes, adc_clock_system()/1e6, clk.adc_gps_clk_corrections);
-		sb = kstr_cat(sb, kstr_wrap(sb2));
-
-		send_msg_encoded(conn, "MSG", "gps_update_cb", "%s", kstr_sp(sb));
+	if (strcmp(cmd, "SET GET_USERS") == 0) {
+		bool include_ip = (conn->type == STREAM_ADMIN);
+		sb = rx_users(include_ip);
+		send_msg(conn, false, "MSG user_cb=%s", kstr_sp(sb));
 		kstr_free(sb);
-        NextTask("gps_update5");
-
 		return true;
 	}
 
-	n = strcmp(cmd, "SET gps_az_el_history");
-	if (n == 0) {
-		if (conn->auth_admin == false) {
-			cprintf(conn, "SET gps_az_el_history: NO ADMIN AUTH %s\n", conn->remote_ip);
-			return true;
+#endif
+
+
+////////////////////////////////
+// UI
+////////////////////////////////
+
+	if (kiwi_str_begins_with(cmd, "SET ident_user=")) {
+        char *ident_user_m = NULL;
+	    sscanf(cmd, "SET ident_user=%256ms", &ident_user_m);
+		bool noname = (ident_user_m == NULL || ident_user_m[0] == '\0');
+		bool setUserIP = false;
+		
+		if (conn->mc == NULL) return true;	// we've seen this
+
+		// no name sent, no previous name set: use ip as name
+		if (noname && !conn->user) setUserIP = true;
+
+		// no name sent, but ip changed: use ip as name
+		if (noname && conn->user && strcmp(conn->user, conn->remote_ip)) setUserIP = true;
+		
+		// else no name sent, but ip didn't change: do nothing
+		
+		//cprintf(conn, "SET ident_user=<%s> noname=%d setUserIP=%d\n", ident_user_m, noname, setUserIP);
+		
+		if (setUserIP) {
+			kiwi_str_redup(&conn->user, "user", conn->remote_ip);
+			conn->isUserIP = TRUE;
+			// printf(">>> isUserIP TRUE: %s:%05d setUserIP=%d noname=%d user=%s <%s>\n",
+			// 	conn->remote_ip, conn->remote_port, setUserIP, noname, conn->user, cmd);
 		}
 
-        time_t t; time(&t);
-        struct tm tm; gmtime_r(&t, &tm);
-        //int now = (tm.tm_hour & 3)*60 + tm.tm_min;
-        int now = tm.tm_min;
-        
-        int az, el;
-        int sat_seen[MAX_SATS], prn_seen[MAX_SATS], samp_seen[AZEL_NSAMP];
-        memset(&sat_seen, 0, sizeof(sat_seen));
-        memset(&prn_seen, 0, sizeof(prn_seen));
-        memset(&samp_seen, 0, sizeof(samp_seen));
-
-        // sat/prn seen during any sample period
-        for (int sat = 0; sat < MAX_SATS; sat++) {
-		    for (int samp = 0; samp < AZEL_NSAMP; samp++) {
-		        if (gps.el[samp][sat] != 0) {
-		            sat_seen[sat] = sat+1;     // +1 bias
-		            prn_seen[sat] = sat+1;     // +1 bias
-		            break;
-		        }
+        // name sent: save new, replace previous (if any)
+		if (!noname) {
+			kiwi_str_decode_inplace(ident_user_m);
+            char *esc = kiwi_str_escape_HTML(ident_user_m);
+            if (esc) {
+                free(ident_user_m);
+                ident_user_m = esc;
+            }
+			kiwi_str_redup(&conn->user, "user", ident_user_m);
+			conn->isUserIP = FALSE;
+			// printf(">>> isUserIP FALSE: %s:%05d setUserIP=%d noname=%d user=%s <%s>\n",
+			// 	conn->remote_ip, conn->remote_port, setUserIP, noname, conn->user, cmd);
+		}
+		
+		// Can only distinguish the TDoA service at the time the kiwirecorder identifies itself.
+		// If a match and the limit is exceeded then kick the connection off immediately.
+		// This identification is typically sent right after initial connection is made.
+		if (kiwi_str_begins_with(conn->user, "TDoA_service")) {
+		    int tdoa_ch = cfg_int("tdoa_nchans", NULL, CFG_REQUIRED);
+		    if (tdoa_ch == -1) tdoa_ch = rx_chans;      // has never been set
+		    int tdoa_users = rx_count_server_conns(TDOA_USERS);
+		    //cprintf(conn, "TDoA_service tdoa_users=%d > tdoa_ch=%d\n", tdoa_users, tdoa_ch);
+		    if (tdoa_users > tdoa_ch) {
+		        //cprintf(conn, "TDoA_service TOO_BUSY\n");
+			    send_msg(conn, SM_NO_DEBUG, "MSG too_busy=%d", tdoa_ch);
+		        conn->kick = true;
 		    }
 		}
 
-        #if 0
-        if (gps_debug) {
-            // any sat/prn seen during specific sample period
-            for (int samp = 0; samp < AZEL_NSAMP; samp++) {
-                for (int sat = 0; sat < MAX_SATS; sat++) {
-                    if (gps.el[samp][sat] != 0) {
-                        samp_seen[samp] = 1;
-                        break;
-                    }
-                }
-            }
+		free(ident_user_m);
+		conn->ident = true;
+		return true;
+	}
 
-            real_printf("-----------------------------------------------------------------------------\n");
-            for (int samp = 0; samp < AZEL_NSAMP; samp++) {
-                if (!samp_seen[samp] && samp != now) continue;
-                for (int sat = 0; sat < MAX_SATS; sat++) {
-                    if (!sat_seen[sat]) continue;
-                    real_printf("%s     ", PRN(prn_seen[sat]-1));
-                }
-                real_printf("SAMP %2d %s\n", samp, (samp == now)? "==== NOW ====":"");
-                for (int sat = 0; sat < MAX_SATS; sat++) {
-                    if (!sat_seen[sat]) continue;
-                    az = gps.az[samp][sat];
-                    el = gps.el[samp][sat];
-                    if (az == 0 && el == 0)
-                        real_printf("         ");
-                    else
-                        real_printf("%3d|%2d   ", az, el);
-                }
-                real_printf("\n");
-            }
-        }
-        #endif
-
-        // send history only for sats seen
-        asprintf(&sb, "{\"n_sats\":%d,\"n_samp\":%d,\"now\":%d,\"sat_seen\":[", MAX_SATS, AZEL_NSAMP, now);
-        sb = kstr_wrap(sb);
-
-		first = 1;
-        for (int sat = 0; sat < MAX_SATS; sat++) {
-            if (!sat_seen[sat]) continue;
-            asprintf(&sb2, "%s%d", first? "":",", sat_seen[sat]-1);   // -1 bias
-            sb = kstr_cat(sb, kstr_wrap(sb2));
-            first = 0;
-        }
-		
-        sb = kstr_cat(sb, "],\"prn_seen\":[");
-		first = 1;
-        for (int sat = 0; sat < MAX_SATS; sat++) {
-            if (!sat_seen[sat]) continue;
-            char *prn_s = PRN(prn_seen[sat]-1);
-            if (*prn_s == 'N') prn_s++;
-            asprintf(&sb2, "%s\"%s\"", first? "":",", prn_s);
-            sb = kstr_cat(sb, kstr_wrap(sb2));
-            first = 0;
-        }
-
-        sb = kstr_cat(sb, "],\"az\":[");
-		first = 1;
-		for (int samp = 0; samp < AZEL_NSAMP; samp++) {
-            for (int sat = 0; sat < MAX_SATS; sat++) {
-                if (!sat_seen[sat]) continue;
-                asprintf(&sb2, "%s%d", first? "":",", gps.az[samp][sat]);
-                sb = kstr_cat(sb, kstr_wrap(sb2));
-                first = 0;
-            }
-        }
-
-        NextTask("gps_az_el_history1");
-        sb = kstr_cat(sb, "],\"el\":[");
-		first = 1;
-		for (int samp = 0; samp < AZEL_NSAMP; samp++) {
-            for (int sat = 0; sat < MAX_SATS; sat++) {
-                if (!sat_seen[sat]) continue;
-                asprintf(&sb2, "%s%d", first? "":",", gps.el[samp][sat]);
-                sb = kstr_cat(sb, kstr_wrap(sb2));
-                first = 0;
-            }
-        }
-
-        asprintf(&sb2, "],\"qzs3\":{\"az\":%d,\"el\":%d},\"shadow_map\":[", gps.qzs_3.az, gps.qzs_3.el);
-        sb = kstr_cat(sb, kstr_wrap(sb2));
-		first = 1;
-        for (int az = 0; az < 360; az++) {
-            asprintf(&sb2, "%s%u", first? "":",", gps.shadow_map[az]);
-            sb = kstr_cat(sb, kstr_wrap(sb2));
-            first = 0;
-        }
-
-        sb = kstr_cat(sb, "]}");
-		send_msg_encoded(conn, "MSG", "gps_az_el_history_cb", "%s", kstr_sp(sb));
-		kstr_free(sb);
-        NextTask("gps_az_el_history2");
+	n = sscanf(cmd, "SET need_status=%d", &j);
+	if (n == 1) {
+		if (conn->mc == NULL) return true;	// we've seen this
+		char *status = (char*) cfg_string("status_msg", NULL, CFG_REQUIRED);
+		send_msg_encoded(conn, "MSG", "status_msg_html", "\f%s", status);
+		cfg_string_free(status);
 		return true;
 	}
 	
-	n = sscanf(cmd, "SET gps_IQ_data_ch=%d", &j);
+	char *geo_m = NULL;
+	n = sscanf(cmd, "SET geo=%127ms", &geo_m);
 	if (n == 1) {
-		if (conn->auth_admin == false) {
-			cprintf(conn, "SET gps_IQ_data_ch: NO ADMIN AUTH %s\n", conn->remote_ip);
-			return true;
+		kiwi_str_decode_inplace(geo_m);
+		//cprintf(conn, "ch%d recv geoloc from client: %s\n", conn->rx_channel, geo_m);
+		char *esc = kiwi_str_escape_HTML(geo_m);
+		if (esc) {
+		    free(geo_m);
+		    geo_m = esc;
 		}
-
-	    gps.IQ_data_ch = j;
+		free(conn->geo);
+		conn->geo = geo_m;
 		return true;
 	}
 
-	n = sscanf(cmd, "SET gps_kick_pll_ch=%d", &j);
+	char *geojson_m = NULL;
+	n = sscanf(cmd, "SET geojson=%256ms", &geojson_m);
 	if (n == 1) {
-		if (conn->auth_admin == false) {
-			cprintf(conn, "SET gps_kick_pll_ch: NO ADMIN AUTH %s\n", conn->remote_ip);
-			return true;
-		}
-
-	    gps.kick_lo_pll_ch = j+1;
-	    printf("gps_kick_pll_ch=%d\n", gps.kick_lo_pll_ch);
+		kiwi_str_decode_inplace(geojson_m);
+		//clprintf(conn, "SET geojson<%s>\n", geojson_m);
+		free(geojson_m);
 		return true;
 	}
-
-	n = sscanf(cmd, "SET gps_gain=%d", &j);
+	
+	char *browser_m = NULL;
+	n = sscanf(cmd, "SET browser=%256ms", &browser_m);
 	if (n == 1) {
-		if (conn->auth_admin == false) {
-			cprintf(conn, "SET gps_gain: NO ADMIN AUTH %s\n", conn->remote_ip);
-			return true;
-		}
-
-	    gps.gps_gain = j;
-	    printf("gps_gain=%d\n", gps.gps_gain);
+		kiwi_str_decode_inplace(browser_m);
+		//clprintf(conn, "SET browser=<%s>\n", browser_m);
+		free(browser_m);
 		return true;
 	}
+	
+#ifndef CFG_GPS_ONLY
+    // used by signal generator etc.
+	int wf_comp;
+	n = sscanf(cmd, "SET wf_comp=%d", &wf_comp);
+	if (n == 1) {
+		c2s_waterfall_compression(conn->rx_channel, wf_comp? true:false);
+		//printf("### SET wf_comp=%d\n", wf_comp);
+		return true;
+	}
+#endif
+
+    if (strcmp(cmd, "SET inactivity_ack") == 0) {
+        conn->last_tune_time = timer_sec();
+        return true;
+    }
+
+
+////////////////////////////////
+// preferences
+////////////////////////////////
 
 	if (kiwi_str_begins_with(cmd, "SET pref_export")) {
 		free(conn->pref_id);
@@ -1134,105 +1189,24 @@ bool rx_common_cmd(const char *stream_name, conn_t *conn, char *cmd)
 		return true;
 	}
 
-	if (kiwi_str_begins_with(cmd, "SET ident_user=")) {
-        char *ident_user_m = NULL;
-	    sscanf(cmd, "SET ident_user=%256ms", &ident_user_m);
-		bool noname = (ident_user_m == NULL || ident_user_m[0] == '\0');
-		bool setUserIP = false;
-		
-		if (conn->mc == NULL) return true;	// we've seen this
-		if (noname && !conn->user) setUserIP = true;
-		if (noname && conn->user && strcmp(conn->user, conn->remote_ip)) setUserIP = true;
 
-		if (setUserIP) {
-			kiwi_str_redup(&conn->user, "user", conn->remote_ip);
-			conn->isUserIP = TRUE;
-			// printf(">>> isUserIP TRUE: %s:%05d setUserIP=%d noname=%d user=%s <%s>\n",
-			// 	conn->remote_ip, conn->remote_port, setUserIP, noname, conn->user, cmd);
-		}
+////////////////////////////////
+// kiwiclient
+////////////////////////////////
 
-		if (!noname) {
-			kiwi_str_decode_inplace(ident_user_m);
-			kiwi_str_redup(&conn->user, "user", ident_user_m);
-			conn->isUserIP = FALSE;
-			// printf(">>> isUserIP FALSE: %s:%05d setUserIP=%d noname=%d user=%s <%s>\n",
-			// 	conn->remote_ip, conn->remote_port, setUserIP, noname, conn->user, cmd);
-		}
-		
-		//clprintf(conn, "SND user: <%s>\n", cmd);
-		if (!conn->arrived) {
-			loguser(conn, LOG_ARRIVED);
-			conn->arrived = TRUE;
-		}
-		
-		free(ident_user_m);
-		return true;
-	}
-
-	n = sscanf(cmd, "SET need_status=%d", &j);
-	if (n == 1) {
-		if (conn->mc == NULL) return true;	// we've seen this
-		char *status = (char*) cfg_string("status_msg", NULL, CFG_REQUIRED);
-		send_msg_encoded(conn, "MSG", "status_msg_html", "\f%s", status);
-		cfg_string_free(status);
-		return true;
-	}
-	
-	char *geo_m = NULL;
-	n = sscanf(cmd, "SET geo=%127ms", &geo_m);
-	if (n == 1) {
-		kiwi_str_decode_inplace(geo_m);
-		//cprintf(conn, "ch%d recv geoloc from client: %s\n", conn->rx_channel, geo_m);
-		free(conn->geo);
-		conn->geo = geo_m;
-		return true;
-	}
-
-	char *geojson_m = NULL;
-	n = sscanf(cmd, "SET geojson=%256ms", &geojson_m);
-	if (n == 1) {
-		kiwi_str_decode_inplace(geojson_m);
-		//clprintf(conn, "SND geo: <%s>\n", geojson_m);
-		free(geojson_m);
-		return true;
-	}
-	
-	char *browser_m = NULL;
-	n = sscanf(cmd, "SET browser=%256ms", &browser_m);
-	if (n == 1) {
-		kiwi_str_decode_inplace(browser_m);
-		//clprintf(conn, "SND browser: <%s>\n", browser_m);
-		free(browser_m);
-		return true;
-	}
-	
+    // DEPRECATED
+    // Replaced by "--tlimit-pw" option that specifies an actual time limit exemption password.
+    // But silently accept for backward compatibility with old versions of kiwiclient still in use.
 	int inactivity_timeout;
 	n = sscanf(cmd, "SET OVERRIDE inactivity_timeout=%d", &inactivity_timeout);
 	if (n == 1) {
-		clprintf(conn, "SET OVERRIDE inactivity_timeout=%d\n", inactivity_timeout);
-		if (inactivity_timeout == 0)
-			conn->inactivity_timeout_override = true;
 		return true;
 	}
 
-    int clk_adj;
-    n = sscanf(cmd, "SET clk_adj=%d", &clk_adj);
-    if (n == 1) {
-		if (conn->auth_admin == false) {
-			cprintf(conn, "clk_adj NO ADMIN AUTH %s\n", conn->remote_ip);
-			return true;
-		}
-		
-        int hz_limit = PPM_TO_HZ(ADC_CLOCK_NOM, ADC_CLOCK_PPM_LIMIT);
-        if (clk_adj < -hz_limit || clk_adj > hz_limit) {
-			cprintf(conn, "clk_adj TOO LARGE = %d %d %d %f\n", clk_adj, -hz_limit, hz_limit, PPM_TO_HZ(ADC_CLOCK_NOM, ADC_CLOCK_PPM_LIMIT));
-			return true;
-		}
-		
-        clock_manual_adj(clk_adj);
-        printf("MANUAL clk_adj = %d\n", clk_adj);
-		return true;
-    }
+
+////////////////////////////////
+// debugging
+////////////////////////////////
 
 	// SECURITY: only used during debugging
 	n = sscanf(cmd, "SET nocache=%d", &i);
@@ -1268,16 +1242,47 @@ bool rx_common_cmd(const char *stream_name, conn_t *conn, char *cmd)
 		return true;
 	}
 
-#if RX_CHANS
-	// SECURITY: FIXME: get rid of this?
-	int wf_comp;
-	n = sscanf(cmd, "SET wf_comp=%d", &wf_comp);
-	if (n == 1) {
-		c2s_waterfall_compression(conn->rx_channel, wf_comp? true:false);
-		printf("### SET wf_comp=%d\n", wf_comp);
+
+////////////////////////////////
+// misc
+////////////////////////////////
+
+	if (strcmp(cmd, "SET is_admin") == 0) {
+	    assert(conn->auth == true);
+		send_msg(conn, false, "MSG is_admin=%d", conn->auth_admin);
 		return true;
 	}
-#endif
+
+	if (strcmp(cmd, "SET get_authkey") == 0) {
+		if (conn->auth_admin == false) {
+			cprintf(conn, "get_authkey NO ADMIN AUTH %s\n", conn->remote_ip);
+			return true;
+		}
+		
+		free(current_authkey);
+		current_authkey = kiwi_authkey();
+		send_msg(conn, false, "MSG authkey_cb=%s", current_authkey);
+		return true;
+	}
+
+    int clk_adj;
+    n = sscanf(cmd, "SET clk_adj=%d", &clk_adj);
+    if (n == 1) {
+		if (conn->auth_admin == false) {
+			cprintf(conn, "clk_adj NO ADMIN AUTH %s\n", conn->remote_ip);
+			return true;
+		}
+		
+        int hz_limit = PPM_TO_HZ(ADC_CLOCK_NOM, ADC_CLOCK_PPM_LIMIT);
+        if (clk_adj < -hz_limit || clk_adj > hz_limit) {
+			cprintf(conn, "clk_adj TOO LARGE = %d %d %d %f\n", clk_adj, -hz_limit, hz_limit, PPM_TO_HZ(ADC_CLOCK_NOM, ADC_CLOCK_PPM_LIMIT));
+			return true;
+		}
+		
+        clock_manual_adj(clk_adj);
+        printf("MANUAL clk_adj = %d\n", clk_adj);
+		return true;
+    }
 
 	if (kiwi_str_begins_with(cmd, "SERVER DE CLIENT")) return true;
 	
@@ -1287,6 +1292,18 @@ bool rx_common_cmd(const char *stream_name, conn_t *conn, char *cmd)
 	// we see these at the close of a connection sometimes; not part of our protocol
     #define ASCII_ETX 3
 	if (strlen(cmd) == 2 && cmd[0] == ASCII_ETX) return true;
+	
+	// we see these timestamps sometimes; not part of our protocol
+	int y, d, h, m, s;
+	if (sscanf(cmd, "%d/%d/%d %d:%d:%d", &y, &n, &d, &h, &m, &s) == 6) {
+	    conn->spurious_timestamps_recvd++;
+	    return true;
+	}
 
+	if (kiwi_str_begins_with(cmd, "SET x-DEBUG")) {
+	    cprintf(conn, "x-DEBUG %s \"%s\"\n", conn->remote_ip, &cmd[12]);
+	    return true;
+	}
+	
 	return false;
 }

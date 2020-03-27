@@ -27,30 +27,28 @@ Boston, MA  02110-1301, USA.
 
 #include <fftw3.h>
 
-struct rx_iq_t {
+//#define DATA_PUMP_DEBUG
+
+typedef struct {
 	u2_t i, q;
 	u1_t q3, i3;	// NB: endian swap
-} __attribute__((packed));
+} __attribute__((packed)) rx_iq_t;
 			
-struct wf_iq_t {
+typedef struct {
 	u2_t i, q;
-} __attribute__((packed));
+} __attribute__((packed)) wf_iq_t;
 
-#define N_DPBUF	16
+#define N_DPBUF	32
 
-struct rx_dpump_t {
+typedef struct {
 	struct {
 		u4_t wr_pos, rd_pos;
-		// array size really NRX_SAMPS but made pow2 FASTFIR_OUTBUF_SIZE for indexing efficiency
+		// array size really nrx_samps but made pow2 FASTFIR_OUTBUF_SIZE for indexing efficiency
 		TYPECPX in_samps[N_DPBUF][FASTFIR_OUTBUF_SIZE];
 		u64_t ticks[N_DPBUF];
 		#ifdef SND_SEQ_CHECK
 		    u4_t in_seq[N_DPBUF];
 		#endif
-		
-		u4_t iq_wr_pos, iq_rd_pos;
-		u4_t iq_seq, iq_seqnum[N_DPBUF];
-		TYPECPX iq_samples[N_DPBUF][FASTFIR_OUTBUF_SIZE];
 		
 		TYPECPX agc_samples[FASTFIR_OUTBUF_SIZE];
 
@@ -70,13 +68,48 @@ struct rx_dpump_t {
 		int zoom, samp_wait_ms;
 		bool overlapped_sampling;
 		ima_adpcm_state_t adpcm_snd;
+
 	};
-};
+} rx_dpump_t;
 
-extern rx_dpump_t rx_dpump[RX_CHANS];
-extern u4_t dpump_resets, dpump_hist[NRX_BUFS];
+extern rx_dpump_t rx_dpump[MAX_RX_CHANS];
 
-extern int rx_adc_ovfl;
+typedef struct {
+    u4_t iq_wr_pos;     // readers maintain their own private iq_rd_pos
+    u4_t iq_seq, iq_seqnum[N_DPBUF];
+    TYPECPX iq_samples[N_DPBUF][FASTFIR_OUTBUF_SIZE];
+} iq_buf_t;
+
+typedef struct {
+    iq_buf_t iq_buf[MAX_RX_CHANS];
+} rx_shmem_t;
+
+#ifdef DRM
+    #include "DRM.h"
+#else
+    #ifdef MULTI_CORE
+        //#define RX_SHMEM_DISABLE
+    #else
+        #define RX_SHMEM_DISABLE
+    #endif
+#endif
+
+#ifdef RX_SHMEM_DISABLE
+    extern rx_shmem_t *rx_shmem_p;
+    #define RX_SHMEM rx_shmem_p
+#else
+    #define RX_SHMEM (&shmem->rx_shmem)
+#endif
+
+typedef struct {
+    u4_t resets, hist[MAX_NRX_BUFS];
+    bool force_reset;
+    u4_t in_hist[N_DPBUF];
+    int rx_adc_ovfl;
+    int audio_dropped;
+} dpump_t;
+
+extern dpump_t dpump;
 
 void data_pump_start_stop();
 void data_pump_init();

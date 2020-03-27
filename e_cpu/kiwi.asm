@@ -29,6 +29,13 @@
 				 nop
 				ENDM
 
+				MACRO	B2B_FreezeTOS
+				 nop								; enough time between two consecutive FreezeTOS
+				 nop
+				 nop
+				 nop
+				ENDM
+
 				MACRO	StackCheck	which expected
 #if STACK_CHECK
 				 push	which
@@ -98,9 +105,9 @@ Entry:
 Ready:
 			wrEvt2	CPU_CTR_DIS
 				wrEvt	HOST_RDY
-#if USE_HBEAT
-				call	heartbeat
-#endif
+				push	CTRL_CMD_READY
+				call	ctrl_set			        ; signal cmd finished
+
 				StackCheck	sp_ready 0
 
 NoCmd:
@@ -108,14 +115,14 @@ NoCmd:
 				rdReg	GET_SRQ						; 0
 				rdBit								; host_srq
 
-#if GPS_CHANS
+#if USE_GPS
 				REPEAT	GPS_CHANS
 				 push	0
 				 rdBit
 				ENDR								; host_srq gps_srq(GPS_CHANS-1) ... (0)
 #endif
 
-#if RX_CHANS
+#if USE_SDR
 				rdReg	GET_RX_SRQ					; host_srq gps_srq(GPS_CHANS-1) ... (0) 0
 				rdBit2								; host_srq gps_srq(GPS_CHANS-1) ... (0) rx_srq
 				
@@ -128,14 +135,15 @@ NoCmd:
 no_rx_svc:											; host_srq gps_srq(GPS_CHANS-1) ... (0)
 #endif
 
-#if GPS_CHANS
+#if USE_GPS
 				REPEAT	GPS_CHANS
 				 SvcGPS	<iter>
 				 StackCheck	(sp_gps # <iter>) (GPS_CHANS - <iter>)
 				ENDR								; host_srq
 #endif
 				
-				brZ		NoCmd
+				brZ		NoCmd                       ; no host_srq pending
+
 			wrEvt2	CPU_CTR_ENA
 				wrEvt	HOST_RST
 				rdReg	HOST_RX						; cmd
@@ -148,6 +156,9 @@ no_rx_svc:											; host_srq gps_srq(GPS_CHANS-1) ... (0)
 				pop
 				br		Ready						; just ignore a bad cmd
 cmd_ok:
+				push	CTRL_CMD_READY
+				call	ctrl_clr			        ; signal cmd busy
+
 #if STACK_CHECK
 				dup
 				push	0xff
@@ -316,29 +327,6 @@ tr_id:			u16		0
 				drop.r
 #endif
 
-#if USE_HBEAT
-heartbeat:
-				push	HEARTBEAT_IND
-				push	hb
-				fetch16
-				push	hb_val
-				fetch16
-				and
-				brZ		hb_flip
-				call	ctrl_set
-				br		hb_cont
-
-hb:				u16		0
-hb_val:			u16		1
-
-hb_flip:
-				call	ctrl_clr
-hb_cont:
-				push	hb
-				incr16
-				drop.r
-#endif
-
 #if STACK_CHECK
 stack_check:                                ; addr #sp
 				addi	3                   ; addr #sp+3			caller did 2 pushes, we're just about to do 1
@@ -430,8 +418,7 @@ Commands:
 				u16		CmdPing2
 				u16		CmdCPUCtrClr
 				u16		CmdGetCPUCtr
-				u16		CmdCtrlSet
-				u16		CmdCtrlClr
+				u16		CmdCtrlClrSet
 				u16		CmdCtrlGet
 				u16		CmdGetMem
 				u16		CmdGetStatus
@@ -441,7 +428,7 @@ Commands:
 				u16     CmdGetSPRP
 
                 // SDR
-#if RX_CHANS
+#if USE_SDR
 				u16		CmdSetRXFreq
 				u16		CmdSetRXNsamps
 				u16		CmdSetGen
@@ -453,10 +440,11 @@ Commands:
 				u16		CmdWFReset
 				u16		CmdGetWFSamples
 				u16		CmdGetWFContSamps
+				u16     CmdSetOVMask
 #endif
 
                 // GPS
-#if GPS_CHANS
+#if USE_GPS
 				u16		CmdSample
 				u16		CmdSetMask
 				u16		CmdSetRateCG
@@ -697,20 +685,33 @@ incr16:										; addr
 ; support
 ; ============================================================================
 
-CmdCtrlSet:		rdReg	HOST_RX
-ctrl_set:
-				push	ctrl
-				fetch16
-				or
-				br		ctrl_update
-
-CmdCtrlClr:		rdReg	HOST_RX
 ctrl_clr:
 				not
 				push	ctrl
 				fetch16
 				and
 ctrl_update:
+				dup
+				wrReg2	SET_CTRL
+				push	ctrl
+				store16
+				drop
+				ret
+ctrl_set:
+				push	ctrl
+				fetch16
+				or
+				br		ctrl_update
+
+CmdCtrlClrSet:
+                rdReg	HOST_RX             ; clr
+                rdReg	HOST_RX             ; clr set
+                swap                        ; set clr
+				not                         ; set ~clr
+				push	ctrl                ; set ~clr &ctrl_old
+				fetch16                     ; set ~clr ctrl_old
+				and                         ; set ctrl_clr
+				or                          ; ctrl_clr_set
 				dup
 				wrReg2	SET_CTRL
 				push	ctrl
@@ -746,7 +747,7 @@ CmdGetCPUCtr:
 ; SDR
 ; ============================================================================
 
-#if RX_CHANS
+#if USE_SDR
 #include kiwi.sdr.asm
 #endif
 
@@ -755,7 +756,7 @@ CmdGetCPUCtr:
 ; GPS
 ; ============================================================================
 
-#if GPS_CHANS
+#if USE_GPS
 #include kiwi.gps.asm
 #endif
 

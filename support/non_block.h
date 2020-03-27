@@ -20,32 +20,46 @@ Boston, MA  02110-1301, USA.
 #pragma once
 
 #include "types.h"
+#include "kiwi.h"
 #include "str.h"
+#include "printf.h"
 
-struct non_blocking_cmd_t {
+
+typedef struct {
     bool open;
 	const char *cmd;
 	FILE *pf;
 	int pfd;
-};
+} non_blocking_cmd_t;
 
-struct nbcmd_args_t {
+typedef struct {
 	const char *cmd;
 	funcPR_t func;
 	int func_param, func_rval;
 	int poll_msec;
 	char *kstr;
-};
+} nbcmd_args_t;
 
 #define NO_WAIT         0
 #define POLL_MSEC(n)    (n)
 
-int child_task(const char *pname, int poll_msec, funcP_t func, void *param);
-int non_blocking_cmd_func_child(const char *pname, const char *cmd, funcPR_t func, int param, int poll_msec);
+int child_task(const char *pname, funcP_t func, int poll_msec=0, void *param=NULL);
+void child_exit(int rv);
+#define NO_ERROR_EXIT false
+int child_status_exit(int status, bool error_exit = true);
+void register_zombie(pid_t child_pid);
+void cull_zombies();
+
+int non_blocking_cmd_func_forall(const char *pname, const char *cmd, funcPR_t func, int param, int poll_msec);
+int non_blocking_cmd_func_foreach(const char *pname, const char *cmd, funcPR_t func, int param, int poll_msec);
 int non_blocking_cmd_system_child(const char *pname, const char *cmd, int poll_msec);
+
+// Deprecated because pclose() can block for an unpredictable length of time.
+// Use one of the routines above.
 kstr_t *non_blocking_cmd(const char *cmd, int *status);
 int non_blocking_cmd_popen(non_blocking_cmd_t *p);
 int non_blocking_cmd_read(non_blocking_cmd_t *p, char *reply, int reply_size);
 int non_blocking_cmd_write(non_blocking_cmd_t *p, char *sbuf);
 int non_blocking_cmd_pclose(non_blocking_cmd_t *p);
+
 kstr_t *read_file_string_reply(const char *filename);

@@ -41,12 +41,12 @@ module KiwiSDR (
     input  wire BBB_MOSI,
     output wire BBB_MISO,
 
-    output wire G030,
-    output wire G031,
-    input  wire G116,
-    output wire G117,
-    output wire G015,		// ctrl[CTRL_INTERRUPT]
-    output wire G014,		// inside pin row
+    output wire P911,
+    output wire P913,
+    input  wire P915,
+    output wire CMD_READY,  // ctrl[CTRL_CMD_READY]
+    output wire SND_INTR,   // ctrl[CTRL_SND_INTR]
+    output wire P926,		// inside pin row
     
     output wire P826,		// outside pin row
     output wire P819,
@@ -67,18 +67,17 @@ module KiwiSDR (
     // debug
     
     // P9: 25 23 21 19 17 15 13 11 09 07 05 03 01
-    //        b3          b2 b1 b0
+    //                    b2 b1 b0
     //
     // P9: 26 24 22 20 18 16 14 12 10 08 06 04 02
-    //     b4
+    //     b3
     
-    wire [4:0] P9;
+    wire [3:0] P9;
     
-    assign G014 = P9[4];    // P9-26
-    assign G117 = P9[3];    // P9-23
-    assign G116 = P9[2];    // P9-15
-    assign G031 = P9[1];    // P9-13
-    assign G030 = P9[0];    // P9-11
+    assign P926 = P9[3];    // P9-26
+    assign P915 = P9[2];    // P9-15
+    assign P913 = P9[1];    // P9-13
+    assign P911 = P9[0];    // P9-11
 
     // P8: 25 23 21 19 17 15 13 11 09 07 05 03 01
     //              b8 b7 b6 b5 b4
@@ -141,13 +140,13 @@ module KiwiSDR (
     end
 
 	assign EWP = ctrl[CTRL_EEPROM_WP];
-	assign G015 = ctrl[CTRL_INTERRUPT];
+	assign CMD_READY = ctrl[CTRL_CMD_READY];
+	assign SND_INTR = ctrl[CTRL_SND_INTR];
 	
 	// keep Vivado from complaining about unused inputs and outputs
 	assign P9[0] = ctrl[CTRL_UNUSED_OUT];
 	assign P9[1] = ctrl[CTRL_UNUSED_OUT];
 	assign P9[3] = ctrl[CTRL_UNUSED_OUT];
-	assign P9[4] = ctrl[CTRL_UNUSED_OUT];
 
 `ifdef MEAS_CIC_OUT
     wire [7:0] cic_out;
@@ -174,7 +173,7 @@ module KiwiSDR (
     // when the firmware returns status it replaces stat_replaced with FW_ID
     wire [2:0] stat_replaced = { 2'b0, unused_inputs };
     wire [3:0] fpga_id = { FPGA_ID };
-    assign status[15:0] = { rx_overflow, stat_replaced, FPGA_VER, stat_user, fpga_id };
+    assign status[15:0] = { rx_overflow_C, stat_replaced, FPGA_VER, stat_user, fpga_id };
 
 
     //////////////////////////////////////////////////////////////////////////
@@ -245,28 +244,44 @@ module KiwiSDR (
         .ctrl       (ctrl)
     	);
 `endif
-    
-	wire rx_ovfl;
-	SYNC_PULSE sync_adc_ovfl (.in_clk(adc_clk), .in(ADC_OVFL), .out_clk(cpu_clk), .out(rx_ovfl));
 
-	wire hb_orst, rx_ovfl_rst;
-	SYNC_WIRE sync_hb_orst (.in(hb_orst), .out_clk(cpu_clk), .out(rx_ovfl_rst));
-
-	reg rx_overflow;
+	wire rx_ovfl_C, rx_orst;
+	reg rx_overflow_C;
     always @ (posedge cpu_clk)
     begin
-    	if (rx_ovfl_rst) rx_overflow <= rx_ovfl; else
-    	rx_overflow <= rx_overflow | rx_ovfl;
+    	if (rx_orst) rx_overflow_C <= rx_ovfl_C; else
+    	rx_overflow_C <= rx_overflow_C | rx_ovfl_C;
     end
 
-	/*
-	reg [21:0] adc_overflow;
+//`define ADC_OVFL_ON_ONE_SAMPLE
+`ifdef ADC_OVFL_ON_ONE_SAMPLE
+	SYNC_PULSE sync_adc_ovfl (.in_clk(adc_clk), .in(ADC_OVFL), .out_clk(cpu_clk), .out(rx_ovfl_C));
+`else
+    // signal overflow only if a variable value of 64k consecutive samples have ADC overflow asserted
+    localparam ADC_OVFL_CTR_BITS = 16;
+	reg [ADC_OVFL_CTR_BITS-1:0] adc_ovfl_ctr, adc_ovfl_cnt, cnt_mask;
+    reg adc_ovfl;
+
+    always @ (posedge cpu_clk)
+        if (wrReg && op[SET_CNT_MASK]) cnt_mask <= tos[ADC_OVFL_CTR_BITS-1:0];
+
     always @ (posedge adc_clk)
     begin
-    	if (wrEvt2 && op[CLR_RX_OVFL]) rx_overflow <= rx_ovfl; else
-    	rx_overflow <= (ADC_OVFL)? 22'b1 : rx_overflow + 1;
+        if (adc_ovfl_ctr == ((1 << ADC_OVFL_CTR_BITS) - 1))
+        begin
+            adc_ovfl <= ((adc_ovfl_cnt & cnt_mask) != 0)? 1:0;
+            adc_ovfl_cnt <= 0;
+            adc_ovfl_ctr <= 0;
+        end else
+        begin
+            adc_ovfl = 0;
+            adc_ovfl_cnt <= adc_ovfl_cnt + ADC_OVFL;
+            adc_ovfl_ctr <= adc_ovfl_ctr + 1;
+        end
     end
-    */
+
+	SYNC_PULSE sync_adc_ovfl (.in_clk(adc_clk), .in(adc_ovfl), .out_clk(cpu_clk), .out(rx_ovfl_C));
+`endif
 
 
     //////////////////////////////////////////////////////////////////////////
@@ -307,8 +322,8 @@ wire [31:0] wcnt;
         .wf_rd		(wf_rd),
         .wf_dout	(wf_dout),
 
-        .hb_ovfl	(rx_overflow),
-        .hb_orst	(hb_orst),
+        .hb_ovfl	(rx_overflow_C),
+        .hb_orst	(rx_orst),          // NB: hb_clk = gps_clk = cpu_clk
 
         .host_dout  (host_dout),
         .mem_rd     (mem_rd),
@@ -393,7 +408,7 @@ wire [31:0] wcnt;
     always @ (posedge cpu_clk)
     begin
         if (rdReg && op[GET_SRQ]) srq_noted <= host_srq;
-        else				     srq_noted <= host_srq | srq_noted;
+        else				      srq_noted <= host_srq | srq_noted;
         if (rdReg && op[GET_SRQ]) srq_out <= srq_noted;
     end
 `endif

@@ -1,2 +1,1 @@
-FILES_EMBED += extensions/timecode/timecode.js extensions/timecode/timecode.css
-FILES_EMBED += extensions/timecode/wwvb.js extensions/timecode/tdf.js
+FILES_EXT += $(subst web/,,$(wildcard web/extensions/timecode/*.js)) extensions/timecode/timecode.css

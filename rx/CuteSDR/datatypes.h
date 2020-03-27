@@ -10,7 +10,6 @@
 #define DATATYPES_H
 
 #include <types.h>
-#include <iostream>
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
@@ -22,29 +21,29 @@
 typedef float tSReal;
 typedef double tDReal;
 
-struct tSComplex
+typedef struct
 {
 	tSReal re;
 	tSReal im;
-};
+} tSComplex;
 
-struct tDComplex
+typedef struct
 {
 	tDReal re;
 	tDReal im;
-};
+} tDComplex;
 
-struct tStereo16
+typedef struct
 {
-	s2_t re;
-	s2_t im;
-};
+	s2_t left;
+	s2_t right;
+} tStereo16;
 
-struct tStereo24
+typedef struct
 {
-	s4_t re;
-	s4_t im;
-};
+	s4_t left;
+	s4_t right;
+} tStereo24;
 
 #ifdef USE_DOUBLE_PRECISION
  #define TYPEREAL	tDReal

@@ -38,7 +38,7 @@
 
 #include "agc.h"
 
-CAgc m_Agc[RX_CHANS];
+CAgc m_Agc[MAX_RX_CHANS];
 
 //////////////////////////////////////////////////////////////////////
 // Local Defines
@@ -168,13 +168,13 @@ void CAgc::SetParameters(bool AgcOn,  bool UseHang, int Threshold, int ManualGai
 //////////////////////////////////////////////////////////////////////
 // Automatic Gain Control calculator for COMPLEX data
 //////////////////////////////////////////////////////////////////////
-void CAgc::ProcessData(int Length, TYPECPX* pInData, TYPECPX* pOutData)
+void CAgc::ProcessData(int Length, TYPECPX* pInData, TYPECPX* pOutData, bool masked)
 {
 	TYPEREAL gain;
 	TYPEREAL mag;
 	TYPECPX delayedin;
 	//m_Mutex.lock();
-	if(m_AgcOn)
+	if (m_AgcOn && !masked)
 	{
 		for(int i=0; i<Length; i++)
 		{
@@ -186,7 +186,8 @@ void CAgc::ProcessData(int Length, TYPECPX* pInData, TYPECPX* pOutData)
 			if( m_SigDelayPtr >= m_DelaySamples)	//deal with delay buffer wrap around
 				m_SigDelayPtr = 0;
 
-#if 1
+#if 0
+            // don't use this due to observed distortion problems
 			mag = MFABS(in.re);
 			TYPEREAL mim = MFABS(in.im);
 			if(mim>mag)
@@ -285,13 +286,13 @@ void CAgc::ProcessData(int Length, TYPECPX* pInData, TYPECPX* pOutData)
 //////////////////////////////////////////////////////////////////////
 // Automatic Gain Control calculator for COMPLEX input, MONO16 output
 //////////////////////////////////////////////////////////////////////
-void CAgc::ProcessData(int Length, TYPECPX* pInData, TYPEMONO16* pOutData)
+void CAgc::ProcessData(int Length, TYPECPX* pInData, TYPEMONO16* pOutData, bool masked)
 {
 	TYPEREAL gain;
 	TYPEREAL mag;
 	TYPECPX delayedin;
 	//m_Mutex.lock();
-	if(m_AgcOn)
+	if (m_AgcOn && !masked)
 	{
 		for(int i=0; i<Length; i++)
 		{
@@ -303,7 +304,8 @@ void CAgc::ProcessData(int Length, TYPECPX* pInData, TYPEMONO16* pOutData)
 			if( m_SigDelayPtr >= m_DelaySamples)	//deal with delay buffer wrap around
 				m_SigDelayPtr = 0;
 
-#if 1
+#if 0
+            // don't use this due to observed distortion problems
 			mag = MFABS(in.re);
 			TYPEREAL mim = MFABS(in.im);
 			if(mim>mag)

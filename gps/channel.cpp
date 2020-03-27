@@ -20,6 +20,8 @@
 
 #include "gps.h"
 #include "spi.h"
+#include "misc.h"
+#include "shmem.h"
 #include "ephemeris.h"
 #include "fec.h"
 
@@ -71,10 +73,11 @@ struct CHANNEL { // Locally-held channel data
     u4_t id;
     int codegen_init;
     int subframe_bits, nsync, total_bits, bits_tow, expecting_preamble, drop_seq;
+    bool abort;
     //jks2
     int LASTsub;
     sdrnav_t nav;
-	SPI_MISO miso;
+	SPI_MISO *miso;
 	
     void  Reset(int sat, int codegen_init);
     void  Start(int sat, int t_sample, int lo_shift, int ca_shift, int snr);
@@ -86,7 +89,7 @@ struct CHANNEL { // Locally-held channel data
     void  Service();
     void  Acquisition(bool delay);
     void  Tracking();
-    void  SignalLost(bool restart);
+    void  SignalLost();
     void  UploadEmbeddedState();
     int   ParityCheck(char *buf, int *nbits);
     void  Subframe(char *buf);
@@ -149,8 +152,8 @@ const char E1BpreambleInverse [] = {1,0,1,0,0,1,1,1,1,1};
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
 void CHANNEL::UploadEmbeddedState() {
-    spi_get(CmdGetChan, &miso, sizeof(ul), ch);
-    memcpy(&ul, miso.byte, sizeof(ul));
+    spi_get(CmdGetChan, miso, sizeof(ul), ch);
+    memcpy(&ul, miso->byte, sizeof(ul));
 	evGPS(EC_EVENT, EV_GPS, -1, "GPS", evprintf("UES ch %d ul %p ms %d bits %d glitches %d buf %d %d %d %d",
 		ch+1, &ul, ul.nav_ms, ul.nav_bits, ul.nav_glitch,
 		ul.nav_buf[0], ul.nav_buf[1], ul.nav_buf[2], ul.nav_buf[3]));
@@ -203,13 +206,34 @@ void CHANNEL::Reset(int sat, int codegen_init) {
     if (isE1B) {
         // download E1B code table
         // assumes BRAM write address is zero from when channel was last reset on signal loss
-        for (int i=0; i < I_DIV_CEIL(E1B_CODELEN, 16); i++) {
-            u2_t code = E1B_code16[Sats[sat].prn-1][i];
-            spi_set_noduplex(CmdSetE1Bcode, ch, code);
-            //printf("E%02d %02d 0x%04x\n", Sats[sat].prn, i, code);
-            // download slowly so as not to potentially starve other eCPU tasks
-            if ((i%4) == 3)
-                TaskSleepMsec(1);
+        int dbg = 0;
+        SPI_MOSI *code_buf = &SPI_SHMEM->gps_e1b_code_mosi;
+
+        for (int i=0; i < E1B_CODE_XFERS; i++) {    // number of SPIBUF_W sized xfers needed (currently 2)
+            if (dbg && i == 0) printf("E1B download ch%2d try %s\nprn: ", ch+1, PRN(sat));
+
+            for (int j=0; j < E1B_CODE_LOOP; j++) {     // code amount needed that also fits in SPIBUF_W
+                u2_t *code = &code_buf->words[j+1];     // NB: spi_mosi_data_t.cmd is in words[0]
+                *code = 0;
+                for (int chan = 0; chan < GPS_CHANS; chan++) {
+                    CHANNEL *c = &Chans[chan];
+                    //int busy = BusyFlags & (1<<chan);
+                    //int prn = (busy && c->isE1B)? Sats[c->sat].prn : 0;
+                    int prn = c->isE1B? Sats[c->sat].prn : 0;
+                    if (dbg && i == 0 && j == 0) printf("%d ", prn);
+                    int bit = (prn > 0)? E1B_code1[prn-1][(i*E1B_CODE_LOOP)+j] : 0;
+                    *code = (*code >> 1) | (bit? (1 << (GPS_CHANS-1)): 0);  // ch0 in lsb
+                    //if (0 && j == 0) printf("ch%2d busy=%d isE1B=%d prn%02d code 0x%03x\n",
+                    //    chan+1, busy? 1:0, busy? c->isE1B:0, prn, *code);
+                }
+                if (dbg && i == 0 && j == 0) printf("\n");
+                if (dbg && i == 0 && j < 16) printf("code(%4d) 0x%03x\n", j, *code);
+                if (dbg && i == 1 && j >= (E1B_CODE_LOOP-16)) printf("code(%4d) 0x%03x\n", (i*E1B_CODE_LOOP)+j, *code);
+            }
+            spi_set_buf_noduplex(CmdSetE1Bcode, code_buf, S2B(E1B_CODE_LOOP));
+
+            // pause so as not to potentially starve other eCPU tasks
+            TaskSleepMsec(1);
         }
         //printf("**** downloaded E1B code table ch%02d %s\n", ch+1, PRN(sat));
     }
@@ -233,6 +257,7 @@ void CHANNEL::Reset(int sat, int codegen_init) {
     pwr_tot=0;
     pwr_pos=0;
     probation=2;    // skip the first few valid subframes so TOW can become valid
+    abort = alert = false;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -272,11 +297,19 @@ void CHANNEL::Start( // called from search thread to initiate acquisition
     // Align code generator by pausing NCO
     int code_period_ms = isE1B? E1B_CODE_PERIOD : L1_CODE_PERIOD;
     int code_period_samples = FS_I/1000 * code_period_ms;
-    uint32_t ca_pause = (code_period_samples*2 - (ca_shift+code_creep)) % code_period_samples;
+
+    uint32_t ca_pause = code_period_samples - ((ca_shift+code_creep) % code_period_samples);
+    uint32_t ca_pause_old = (code_period_samples*2 - (ca_shift+code_creep)) % code_period_samples;
+    if (ca_pause != ca_pause_old) {
+        lprintf("ca_pause %d ca_pause_old %d ca_shift=%d code_creep=%d code_period_ms=%d code_period_samples=%d\n",
+            ca_pause, ca_pause_old, ca_shift, code_creep, code_period_ms, code_period_samples);
+    }
+
     if (ca_pause > 0xffff) {
-        lprintf("ca_pause %d 0x%x ca_shift=%d code_creep=%d code_period_ms=%d code_period_samples=%d\n",
+        lprintf("> 0xffff: ca_pause %d 0x%x ca_shift=%d code_creep=%d code_period_ms=%d code_period_samples=%d\n",
             ca_pause, ca_pause, ca_shift, code_creep, code_period_ms, code_period_samples);
-        assert(ca_pause <= 0xffff);     // hardware limit
+        lprintf("> 0xffff: lo_shift=%d lo_dop=%f ca_dop=%f secs=%f\n", lo_shift, lo_dop, ca_dop, secs);
+        //assert(ca_pause <= 0xffff);     // hardware limit
     }
 	if (ca_pause) spi_set(CmdPause, ch, ca_pause-1);
 
@@ -284,7 +317,7 @@ void CHANNEL::Start( // called from search thread to initiate acquisition
     TaskSleepMsec(3);
     // ... enabling embedded PI controllers
     spi_set(CmdSetMask, BusyFlags |= 1<<ch);
-    TaskWakeup(id, true, 0);
+    TaskWakeup(id, TWF_CHECK_WAKING, 0);
 
 	GPSstat(STAT_DEBUG, secs, ch, ca_shift, code_creep, ca_pause);
 
@@ -302,7 +335,7 @@ void CHANNEL::Service() {
 
     Acquisition(true);
     Tracking();
-    SignalLost(false);
+    SignalLost();
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -384,12 +417,12 @@ void CHANNEL::Tracking() {
         spi_set(CmdSetPolarity, ch, 0);
     }
 
-    for (int watchdog=0; watchdog < (isE1B? TIMEOUT_E1B:TIMEOUT); watchdog++) {
+    for (int watchdog=0; watchdog < (isE1B? TIMEOUT_E1B:TIMEOUT) && !abort; watchdog++) {
     
 	    //evGPS(EC_EVENT, EV_GPS, ch, "GPS", evprintf("TaskSleepMsec(250) ch %d", ch+1));
         TaskSleepUsec(POLLING_US);
         UploadEmbeddedState();
-        TaskStat(TSTAT_INCR|TSTAT_ZERO, 0, 0, 0);
+        TaskStat(TSTAT_INCR|TSTAT_ZERO, 0, "trk");
 
         // Process NAV data
         //for(int avail = RemoteBits(ul.nav_bits) & ~0xF; avail; avail-=16) {
@@ -431,12 +464,14 @@ void CHANNEL::Tracking() {
             if (err == 0) {
                 assert(nbits == subframe_bits);
                 expecting_preamble = 1;
-                int tow_pg = Ephemeris[sat].tow_pg;
                 int sub = Ephemeris[sat].sub;
                 LASTsub = sub;
-                int tow = Ephemeris[sat].tow;
-                if (0) printf("%s PRE  TOW %d(%d) %s%d|%d hold %d hold-subframe_bits %d bits_tow %d %.3f %.1f\n",
-                    PRN(sat), tow/6, tow, isE1B? "pg":"sf", sub, tow_pg, holding, holding-subframe_bits, bits_tow, (float) bits_tow/50, (float) bits_tow/subframe_bits);
+                if (0) {
+                    int tow_pg = Ephemeris[sat].tow_pg;
+                    int tow = Ephemeris[sat].tow;
+                    printf("%s PRE  TOW %d(%d) %s%d|%d hold %d hold-subframe_bits %d bits_tow %d %.3f %.1f\n",
+                        PRN(sat), tow/6, tow, isE1B? "pg":"sf", sub, tow_pg, holding, holding-subframe_bits, bits_tow, (float) bits_tow/50, (float) bits_tow/subframe_bits);
+                }
                 //printf("%s set  lsf%d\n", PRN(sat), LASTsub);
                 if (LASTsub == 1) {
                     //printf("%s SF1  hold %d\n", PRN(sat), holding);
@@ -515,15 +550,16 @@ void CHANNEL::Tracking() {
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
-void CHANNEL::SignalLost(bool restart) {
+void CHANNEL::SignalLost() {
+    // Re-enable search for this sat
+    SearchEnable(sat);
+
     // Disable embedded PI controllers
     BusyFlags &= ~(1<<ch);
     spi_set(CmdSetMask, BusyFlags);
 
-    // Re-enable search for this sat
-    SearchEnable(ch, sat, restart);
-
     GPSstat(STAT_POWER, -1, ch); // Flatten bar graph
+    isE1B = 0;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -619,73 +655,74 @@ static unsigned subframe_dump;
 
 void CHANNEL::Subframe(char *buf) {
 	unsigned sub = bin(buf+49,3);
-    unsigned page = bin(buf+62,6);
 
     alert = bin(buf+47,1);
+    
+    //#define SUBFRAME_DEBUG
+    #if defined(SUBFRAME_DEBUG) || !defined(QUIET)
+        unsigned page = bin(buf+62,6);
+    #endif
 
-#ifndef	QUIET
-    printf("sat%02d sub %d ", Sats[sat].prn, sub);
-    if (sub > 3) printf("page %02d", page);
-    printf("\n");
-#endif
+    #ifndef	QUIET
+        printf("sat%02d sub %d ", Sats[sat].prn, sub);
+        if (sub > 3) printf("page %02d", page);
+        printf("\n");
+    #endif
 
-    #if 0
-    if (!gps_debug) {
-	    if (sub < 1 || sub > SUBFRAMES) return;
-    } else {
-        unsigned tlm = bin(buf+8,14);
-        unsigned tow = bin(buf+30,17);
-        static unsigned last_good_tlm, last_good_tow;
-        static bool gps_debugging;
-        static int sub_seen[SUBFRAMES+1];
-        
-        if (!gps_debugging) {
-            lprintf("GPS: subframe debugging enabled\n");
-            gps_debugging = true;
-        }
-        
-        if (sub < 1 || sub > SUBFRAMES) {
-            lprintf("GPS: unknown subframe %d prn%02d preamble 0x%02x[0x8b] tlm %d[%d] tow %d[%d] alert/AS %d data-id %d page-id %d novfl %d tracking %d good %d frames %d par_errs %d\n",
-                sub, Sats[sat].prn, bin(buf,8), tlm, last_good_tlm, tow, last_good_tow, bin(buf+47,2), bin(buf+60,2), page, gps.ch[ch].novfl, gps.tracking, gps.good, gps.ch[ch].frames, gps.ch[ch].par_errs);
-            for (int i=0; i<10; i++) {
-                lprintf("GPS: w%d b%3d %06x %02x\n", i, i*30, bin(buf+i*30,24), bin(buf+i*30+24,6));
+    #ifdef SUBFRAME_DEBUG
+        if (gps_debug) {
+            unsigned tlm = bin(buf+8,14);
+            unsigned tow = bin(buf+30,17);
+            static unsigned last_good_tlm, last_good_tow;
+            static bool gps_debugging;
+            static int sub_seen[SUBFRAMES+1];
+            
+            if (!gps_debugging) {
+                lprintf("GPS: subframe debugging enabled\n");
+                gps_debugging = true;
             }
-            //subframe_dump = 5 * 25;   // full 12.5 min cycle
-            subframe_dump = 5 * 2;      // two subframe cycles
-            return;
-        }
-        
-        if (subframe_dump) {
-            if (!sub_seen[sub]) {
-                lprintf("GPS: dump #%2d subframe %d page %2d prn%02d novfl %d tracking %d good %d frames %d par_errs %d\n",
-                    subframe_dump, sub, (sub > 3)? page : -1, Sats[sat].prn, gps.ch[ch].novfl, gps.tracking, gps.good, gps.ch[ch].frames, gps.ch[ch].par_errs);
-                sub_seen[sub] = 1;
-                int prev = (sub == 1)? 5 : (sub-1);
-                sub_seen[prev] = 0;
-                subframe_dump--;
+            
+            if (sub < 1 || sub > SUBFRAMES) {
+                lprintf("GPS: unknown subframe %d prn%02d preamble 0x%02x[0x8b] tlm %d[%d] tow %d[%d] alert/AS %d data-id %d page-id %d novfl %d tracking %d good %d frames %d par_errs %d\n",
+                    sub, Sats[sat].prn, bin(buf,8), tlm, last_good_tlm, tow, last_good_tow, bin(buf+47,2), bin(buf+60,2), page, gps.ch[ch].novfl, gps.tracking, gps.good, gps.ch[ch].frames, gps.ch[ch].par_errs);
+                for (int i=0; i<10; i++) {
+                    lprintf("GPS: w%d b%3d %06x %02x\n", i, i*30, bin(buf+i*30,24), bin(buf+i*30+24,6));
+                }
+                //subframe_dump = 5 * 25;   // full 12.5 min cycle
+                subframe_dump = 5 * 2;      // two subframe cycles
+                return;
             }
-        }
-        
-        last_good_tlm = tlm;
-        last_good_tow = tow;
-    }
+            
+            if (subframe_dump) {
+                if (!sub_seen[sub]) {
+                    lprintf("GPS: dump #%2d subframe %d page %2d prn%02d novfl %d tracking %d good %d frames %d par_errs %d\n",
+                        subframe_dump, sub, (sub > 3)? page : -1, Sats[sat].prn, gps.ch[ch].novfl, gps.tracking, gps.good, gps.ch[ch].frames, gps.ch[ch].par_errs);
+                    sub_seen[sub] = 1;
+                    int prev = (sub == 1)? 5 : (sub-1);
+                    sub_seen[prev] = 0;
+                    subframe_dump--;
+                }
+            }
+            
+            last_good_tlm = tlm;
+            last_good_tow = tow;
+        } else
     #else
-	if (sub < 1 || sub > SUBFRAMES) return;
+        { if (sub < 1 || sub > SUBFRAMES) return; }
     #endif
 
 	GPSstat(STAT_SUB, 0, ch, sub, alert? (gps.include_alert_gps? 2:1) : 0);
 }
 
 void CHANNEL::Status() {
-    double rssi = sqrt(GetPower());
     double lo_f = GetFreq(ul.lo_freq) - FC;
     double ca_f = GetFreq(ul.ca_freq) - CPS;
 
 	GPSstat(STAT_LO, lo_f, ch);
 	GPSstat(STAT_CA, ca_f, ch);
-#ifndef QUIET
-    printf("chan %d PRN %2d rssi %4.0f adj %2d freq %5.6f %6.6f ", ch, Sats[sat].prn, rssi, gain_adj_lo, lo_f, ca_f);
-#endif
+    #ifndef QUIET
+        printf("chan %d PRN %2d rssi %4.0f adj %2d freq %5.6f %6.6f ", ch, Sats[sat].prn, sqrt(GetPower()), gain_adj_lo, lo_f, ca_f);
+    #endif
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -714,16 +751,26 @@ int CHANNEL::ParityCheck(char *buf, int *nbits) {
         nav.flen = 500;
         nav.fbits = buf;
         nav.tow_updated = 0;
-        int id_or_error = decode_e1b(&nav);
-        if (id_or_error < 0) probation = 2;
-        if (id_or_error == -1) return *nbits = E1B_TSYM_PP;     // need to slip by a page (half a word)
-        if (id_or_error < 0) return *nbits = subframe_bits;     // any other errors (CRC etc)
+        int error = 0;
+        int id = decode_e1b(&nav, &error);
+        if (error) probation = 2;
+        if (error == GPS_ERR_SLIP) return *nbits = E1B_TSYM_PP;     // need to slip by a page (half a word)
+        if (error && (error != GPS_ERR_ALERT && error != GPS_ERR_OOS))
+            return *nbits = subframe_bits;     // any other errors (CRC etc)
 
         if (nav.tow_updated)    // page had TOW so reset bit counter
             bits_tow = holding - subframe_bits;
 
         Status();
-        if (id_or_error >= 1 && id_or_error <= 5) GPSstat(STAT_SUB, 0, ch, id_or_error, 0);
+        if (id == 5) alert = (error == GPS_ERR_ALERT || error == GPS_ERR_OOS);
+        if (id >= 1 && id <= 5) GPSstat(STAT_SUB, 0, ch, id, alert? (gps.include_alert_gps? 2:1) : 0);
+
+        // show alert for 8 seconds (time between id 5 and 4 update) before dropping channel
+        if (alert && id == 4) {
+            GPSstat(STAT_SUB, 0, ch, id, 0);    // remove alert indicator
+            abort = true;
+        }
+
         if (probation) probation--;
         *nbits = subframe_bits;
     } else {
@@ -823,6 +870,7 @@ void ChanTask(void *param) { // one thread per channel
     Chans[ch].ch = ch;
     unsigned bit = 1<<ch;
     Chans[ch].id = TaskID();
+    Chans[ch].miso = &SPI_SHMEM->gps_channel_miso[ch];
 
     for (;;) {
     	TaskSleep();
@@ -835,15 +883,30 @@ void ChanTask(void *param) { // one thread per channel
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
 int ChanReset(int sat, int codegen_init) {  // called from search thread before sampling
+    int ch, nbusy, cur_QZSS;
+    
+    bool QZSS_JA = (gps.acq_QZSS && gps.QZSS_prio);
 
-    // due to BRAM constraints only some channels are E1B capable
-    int min_ch = is_E1B(sat)? 0 : GALILEO_CHANS;
-    int max_ch = is_E1B(sat)? GALILEO_CHANS : gps_chans;
-    //int max_ch = is_E1B(sat)? GALILEO_CHANS : (GALILEO_CHANS+2);    //jks2 two gps chans
-    //int max_ch = is_E1B(sat)? 1 : gps_chans;    //jks2 one E1B chan
+    if (QZSS_JA) for (ch = nbusy = cur_QZSS = 0; ch < gps_chans; ch++) {
+        if (!(BusyFlags & (1<<ch))) continue;
+        if (Sats[Chans[ch].sat].type == QZSS) cur_QZSS++;
+        nbusy++;
+    }
 
-    for (int ch = min_ch; ch < max_ch; ch++) {
+    #define QZSS_RESERVED 2
+    int nfree = gps_chans - nbusy;
+    int nresv = MIN(QZSS_RESERVED, gps.n_QZSS - cur_QZSS);
+    bool QZSS_limit = (QZSS_JA && nfree <= nresv);
+
+    for (ch = 0; ch < gps_chans; ch++) {
         if (BusyFlags & (1<<ch)) continue;
+
+        // if QZSS_JA mode enabled don't let non-QZSS get last QZSS_RESERVED channels (reduced by number currently active)
+        if (QZSS_limit && Sats[sat].type != QZSS) {
+            //printf("QZSS_RESERVED ch%02d %s nfree=%d nresv=%d\n", ch, PRN(sat), nfree, nresv);
+            return -1;
+        }
+
         Chans[ch].Reset(sat, codegen_init);
         return ch;
     }
@@ -862,4 +925,15 @@ void ChanStart( // called from search thread to initiate acquisition of detected
     int snr) {
 
     Chans[ch].Start(sat, t_sample, lo_shift, ca_shift, snr);
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+void ChanRemove(sat_e type) {
+
+    for (int ch = 0; ch < gps_chans; ch++) {
+        if (!(BusyFlags & (1<<ch))) continue;
+        if (Sats[Chans[ch].sat].type != type) continue;
+        Chans[ch].abort = true;
+    }
 }

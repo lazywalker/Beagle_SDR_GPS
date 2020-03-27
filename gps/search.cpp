@@ -18,6 +18,20 @@
 // http://www.holmea.demon.co.uk/GPS/Main.htm
 //////////////////////////////////////////////////////////////////////////
 
+#include "types.h"
+#include "kiwi.h"
+#include "rx.h"
+#include "clk.h"
+#include "cfg.h"
+#include "misc.h"
+#include "gps.h"
+#include "spi.h"
+#include "cacode.h"
+#include "e1bcode.h"
+#include "debug.h"
+#include "simd.h"
+#include "shmem.h"
+
 #include <stdio.h>
 #include <sys/file.h>
 #include <fcntl.h>
@@ -28,18 +42,6 @@
 #include <memory.h>
 #include <fftw3.h>
 #include <math.h>
-
-#include "types.h"
-#include "kiwi.h"
-#include "clk.h"
-#include "cfg.h"
-#include "misc.h"
-#include "gps.h"
-#include "spi.h"
-#include "cacode.h"
-#include "e1bcode.h"
-#include "debug.h"
-#include "simd.h"
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -74,7 +76,7 @@ void SearchParams(int argc, char *argv[]) {
 		if (strcmp(v, "?")==0 || strcmp(v, "-?")==0 || strcmp(v, "--?")==0 || strcmp(v, "-h")==0 ||
 			strcmp(v, "h")==0 || strcmp(v, "-help")==0 || strcmp(v, "--h")==0 || strcmp(v, "--help")==0) {
 			printf("GPS args:\n\t-gsig signal_threshold\n\t-gt test mode\n");
-			xit(0);
+			kiwi_exit(0);
 		}
 		if (strcmp(v, "-gsig")==0) {
 			i++; minimum_sig = strtol(argv[i], 0, 0);
@@ -183,9 +185,9 @@ void SearchInit() {
     for (sat = 0, sp = Sats; sp->prn != -1; sat++, sp++) {
         sp->sat = sat;
         switch (sp->type) {
-            case Navstar: default: asprintf(&sp->prn_s, "N%02d ", sp->prn); break;
-            case QZSS: asprintf(&sp->prn_s, "Q%d", sp->prn); break;
-            case E1B: asprintf(&sp->prn_s, "E%02d ", sp->prn); break;
+            case Navstar: default: asprintf(&sp->prn_s, "N%02d ", sp->prn); gps.n_Navstar++; break;
+            case QZSS: asprintf(&sp->prn_s, "Q%d", sp->prn); gps.n_QZSS++; break;
+            case E1B: asprintf(&sp->prn_s, "E%02d ", sp->prn); gps.n_E1B++; break;
         }
         //printf("sat %d PRN %d %s\n", sat, sp->prn, sp->prn_s);
     }
@@ -196,6 +198,8 @@ void SearchInit() {
     
     GPSstat_init();
     printf("GPS_INTEG_BITS %d\n", GPS_INTEG_BITS);
+    
+    assert((GPS_SAMPS % GPS_SAMPS_RPT) == 0);
     
     const float ca_rate = CPS/FS;
 	float ca_phase=0;
@@ -213,7 +217,7 @@ void SearchInit() {
             }
             printf("\t%s first 16 chips: 0%04x\n", PRN(sp->sat), chips);
         }
-        xit(0);
+        kiwi_exit(0);
 	#endif
 
     //#define QZSS_PRN_TEST
@@ -228,7 +232,7 @@ void SearchInit() {
             }
             printf("\t%s first 10 chips: 0%04o\n", PRN(sp->sat), chips);
         }
-        xit(0);
+        kiwi_exit(0);
 	#endif
 
 	printf("DECIM %d FFT %d planning..\n", DECIM, FFT_LEN);
@@ -295,7 +299,7 @@ void SearchInit() {
             e1bt2.Clock();
         }
         printf(" PRN E2 0x96b85\n");
-        xit(0);
+        kiwi_exit(0);
     #endif
 
     float e1b_rate = CPS/FS;
@@ -317,11 +321,6 @@ void SearchInit() {
             if (e1b_phase >= 1.0) { // reached or crossed chip boundary?
                 e1b_phase -= 1.0;
                 e1b.Clock();
-
-                // These two lines do not make much difference
-                boc11 = (e1b_phase >= 0.5)? 1:0;    // add in BOC11
-                chip *= 1.0 - e1b_phase;                 // prev chip
-                chip += e1b_phase * Bipolar(e1b.Chip() ^ boc11);  // next chip
             }
 
             fwd_buf[i][0] = chip;
@@ -346,7 +345,7 @@ void SearchInit() {
     }
 
     //printf("computing CODE FFTs DONE\n");
-    CreateTask(SearchTask, 0, GPS_ACQ_PRIORITY);
+    CreateTaskF(SearchTask, 0, GPS_ACQ_PRIORITY, CTF_NO_PRIO_INV);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -374,7 +373,7 @@ void GenSamples(char *rbuf, int bytes) {
     //printf("GenSamples bytes=%d/%d 0x%02x 0x%02x 0x%02x\n", i, bytes, rbuf[0], rbuf[1], rbuf[2]);
     if (i != bytes) {
         printf("end of GPS samples data file\n");
-        xit(0);
+        kiwi_exit(0);
     }
 }
 #endif
@@ -390,21 +389,20 @@ static void Sample() {
 
     float lo_phase=0; // NCO phase accumulator
     int i=0;
+    SPI_MISO *rx = &SPI_SHMEM->gps_search_miso;
 	
 	spi_set(CmdSample); // Trigger sampler and reset code generator in FPGA
 	TaskSleepUsec(US);
 
-	while (i < NSAMPLES) {
-        static SPI_MISO rx;
-        
+	while (i < NSAMPLES) {        
 	    #ifdef GPS_SAMPLES_FROM_FILE
-		    GenSamples(rx.byte, PACKET);
+		    GenSamples(rx->byte, PACKET);
 		#else
-            spi_get(CmdGetGPSSamples, &rx, PACKET);
+            spi_get(CmdGetGPSSamples, rx, PACKET);
         #endif
 
         for (int j=0; j<PACKET; ++j) {
-			u1_t byte = rx.byte[j];
+			u1_t byte = rx->byte[j];
 
             for (int b=0; b<8; ++b, ++i, byte>>=1) {
             	const int bit = (byte&1);
@@ -468,7 +466,7 @@ static float Correlate(int sat, const fftwf_complex *data, int *max_snr_dop, int
 
 		// prod = conj(data)*code, with doppler shifting applied to C/A or E1B code FFT
 		#if 1
-		    simd_multiply_conjugate(FFT_LEN, data, code[sat]+FFT_LEN-dop, prod);
+		    simd_multiply_conjugate_ccc(FFT_LEN, data, code[sat]+FFT_LEN-dop, prod);
 		#else
             for (i=0; i<FFT_LEN; i++) {
                 int j=(i-dop+FFT_LEN)%FFT_LEN;	// doppler shifting applied to C/A or E1B code FFT
@@ -501,7 +499,7 @@ static float Correlate(int sat, const fftwf_complex *data, int *max_snr_dop, int
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
 
-void SearchEnable(int ch, int sat, bool restart) {
+void SearchEnable(int sat) {
     Sats[sat].busy = false;
 }
 
@@ -522,8 +520,17 @@ void SearchTask(void *param) {
 	GPSstat(STAT_ACQUIRE, 0, 1);
 
     for(;;) {
+        if (!gps.acq_Navstar && !gps.acq_QZSS && !gps.acq_Galileo) {
+            TaskSleepSec(1);    // wait for UI to change acq settings
+            continue;
+        }
+        
         for (sp = Sats; sp->prn != -1; sp++) {
             sat = sp->sat;
+
+            if (sp->type == Navstar && !gps.acq_Navstar) continue;
+            if (sp->type == QZSS && !gps.acq_QZSS) continue;
+            if (sp->type == E1B && !gps.acq_Galileo) continue;
 
             //jks2
             if (gps_debug > 0 && sp->prn != gps_debug) continue;    //jks2
@@ -540,7 +547,6 @@ void SearchTask(void *param) {
             min_sig = (sp->type == E1B)? 16 : minimum_sig;
 
             if (sp->busy) {     // sat already acquired?
-                gps.include_alert_gps = admcfg_bool("include_alert_gps", NULL, CFG_REQUIRED);
             	NextTask("busy1");		// let cpu run
                 continue;
             }
@@ -554,16 +560,9 @@ void SearchTask(void *param) {
                 case E1B: codegen_init = E1B_MODE | (sp->prn-1); break;
             }
 
-            #if GALILEO_CHANS == 0
-                while ((ch = ChanReset(sat, codegen_init)) < 0) {   // all channels busy?
-                    TaskSleepMsec(1000);
-                    //NextTask("all chans busy");
-                }
-            #else
-                if ((ch = ChanReset(sat, codegen_init)) < 0) {      // all channels busy?
-                    continue;
-                }
-            #endif
+            if ((ch = ChanReset(sat, codegen_init)) < 0) {      // all channels busy?
+                continue;
+            }
 			
 			if ((last_ch != ch) && (snr < min_sig)) GPSstat(STAT_SAT, 0, last_ch, -1, 0, 0);
 
@@ -606,12 +605,12 @@ static int gps_acquire = 1;
 
 // Decide if the search task should run.
 // Conditional because of the large load the acquisition FFT places on the Beagle.
-bool SearchTaskRun()
+void SearchTaskRun()
 {
-	if (searchTaskID == -1) return false;
+	if (searchTaskID == -1) return;
 	
 	bool start = false;
-	int users = rx_server_users();
+	int users = rx_count_server_conns(EXTERNAL_ONLY);
 	
 	// startup: no clock corrections done yet
 	if (clk.adc_gps_clk_corrections == 0) start = true;
@@ -627,13 +626,10 @@ bool SearchTaskRun()
 	
 	if (admcfg_bool("always_acq_gps", NULL, CFG_REQUIRED) == true) start = true;
 	
-	if (update_in_progress || sd_copy_in_progress || backup_in_progress) start = false;
+	if (update_in_progress || sd_copy_in_progress || backup_in_progress || is_locked) start = false;
 	
-	bool enable = (admcfg_bool("enable_gps", NULL, CFG_REQUIRED) == true);
-	if (!enable) start = false;
-
-	//printf("SearchTaskRun: acq %d start %d good %d users %d fixes %d gps_corr %d\n",
-	//	gps_acquire, start, gps.good, users, gps.fixes, clk.adc_gps_clk_corrections);
+	//printf("SearchTaskRun: acq %d start %d is_locked %d good %d users %d fixes %d gps_corr %d\n",
+	//	gps_acquire, start, is_locked, gps.good, users, gps.fixes, clk.adc_gps_clk_corrections);
 	
 	if (gps_acquire && !start) {
 		//printf("SearchTaskRun: $sleep\n");
@@ -645,8 +641,6 @@ bool SearchTaskRun()
 		//printf("SearchTaskRun: $wakeup\n");
 		gps_acquire = 1;
 		GPSstat(STAT_ACQUIRE, 0, gps_acquire);
-		TaskWakeup(searchTaskID, FALSE, 0);
+		TaskWakeup(searchTaskID, TWF_NONE, 0);
 	}
-	
-	return enable;
 }

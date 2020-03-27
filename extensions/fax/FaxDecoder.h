@@ -41,8 +41,8 @@ public:
     struct firfilter {
         enum Bandwidth {NARROW, MIDDLE, WIDE};
         firfilter() {}
-    firfilter(enum Bandwidth b) : bandwidth(b), current(0)
-        { for(int i=0; i<17; i++) buffer[i] = 0; }
+        firfilter(enum Bandwidth b) : bandwidth(b), current(0)
+            { for(int i=0; i<17; i++) buffer[i] = 0; }
         enum Bandwidth bandwidth;
         TYPEREAL buffer[17];
         int current;
@@ -52,10 +52,10 @@ public:
         
     ~FaxDecoder() { FreeImage(); CleanUpBuffers(); }
 
-    bool Configure(int rx_chan, int imagewidth, int BitsPerPixel, int carrier,
+    bool Configure(int rx_chan, int lpm, int imagewidth, int BitsPerPixel, int carrier,
                    int deviation, enum firfilter::Bandwidth bandwidth,
-                   double minus_saturation_threshold,
-                   bool bSkipHeaderDetection, bool bIncludeHeadersInImages, bool reset);
+                   double minus_saturation_threshold, bool bIncludeHeadersInImages,
+                   bool use_phasing, bool autostop, int debug, bool reset);
 
     void ProcessSamples(s2_t *samps, int nsamps, float shift);
     void FileOpen();
@@ -69,17 +69,15 @@ public:
     void InitializeImage();
     void FreeImage();
 
-    u1_t *m_imgdata;
+    u1_t *m_imgdata, *m_outImage;
     int m_imageline;
     int m_imagewidth;
     double m_minus_saturation_threshold;
-    double *datadouble;
 
 private:
-    bool DecodeFax();
+    bool DecodeFaxLine();
     void DemodulateData();
 
-    void CloseInput();
     void SetupBuffers();
     void CleanUpBuffers();
 
@@ -92,22 +90,21 @@ private:
     double m_SamplesPerSec_nom;
     double m_SamplesPerSec_frac, m_SamplesPerSec_frac_prev;
     double m_SampleRateRatio, m_fi;
+    double m_lineIncrFrac, m_lineIncrAcc, m_lineBlend;
     int m_SamplesPerLine, m_skip;
     int m_BytesPerLine;
 
-    /* internal state machine */
     TYPEREAL Iprev, Qprev;
-    s2_t *samples;
+    s2_t *m_samples;
     int m_samp_idx;
-    u1_t *data;
-    int *data_i;
+    u1_t *m_demod_data;
 
     enum Header {IMAGE, START, STOP};
 
-    TYPEREAL FourierTransformSub(u1_t* buffer, int buffer_len, int freq);
-    Header DetectLineType(u1_t* buffer, int buffer_len);
+    TYPEREAL FourierTransformSub(u1_t* buffer, int samps_per_line, int buffer_len, int freq);
+    Header DetectLineType(u1_t* buffer, int samps_per_line, int buffer_len);
     void DecodeImageLine(u1_t* buffer, int buffer_len, u1_t *image);
-    int FaxPhasingLinePosition(u1_t *image, int imagewidth);
+    int FaxPhasingLinePosition(u1_t *image, int samplesPerLine);
     void UpdateSampleRate();
 
     /* fax settings */
@@ -116,11 +113,13 @@ private:
     struct firfilter firfilters[2];
     bool m_bSkipHeaderDetection;
     bool m_bIncludeHeadersInImages;
+    bool m_use_phasing;
+    bool m_autostop, m_autostopped;
     int m_imagecolors;
     int m_lpm;
     bool m_bFM;
-    int m_StartFrequency, m_StopFrequency;
-    int m_StartLength, m_StopLength;
+    int m_Start_IOC576_Frequency, m_Start_IOC288_Frequency, m_StopFrequency;
+    int m_StartStopLength;
     int m_phasingLines;
     int m_offset;
     int m_imgsize;
@@ -133,7 +132,9 @@ private:
     bool gotstart;
 
     int *phasingPos;
-    int phasingLinesLeft, phasingSkipData, phasingSkippedData;
+    int phasingLinesLeft, phasingSkipData;
+    bool have_phasing;
+    int m_debug;
 };
 
-extern FaxDecoder m_FaxDecoder[RX_CHANS];
+extern FaxDecoder m_FaxDecoder[MAX_RX_CHANS];

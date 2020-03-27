@@ -1,15 +1,16 @@
 // Copyright (c) 2016 John Seamons, ZL/KF6VO
 
-var s4285_ext_name = 's4285';		// NB: must match s4285.c:s4285_ext.name
-
-var s4285_first_time = true;
+var s4285 = {
+   ext_name: 's4285',      // NB: must match s4285.c:s4285_ext.name
+   first_time: true
+};
 
 function s4285_main()
 {
-	ext_switch_to_client(s4285_ext_name, s4285_first_time, s4285_recv);		// tell server to use us (again)
-	if (!s4285_first_time)
+	ext_switch_to_client(s4285.ext_name, s4285.first_time, s4285_recv);		// tell server to use us (again)
+	if (!s4285.first_time)
 		s4285_controls_setup();
-	s4285_first_time = false;
+	s4285.first_time = false;
 }
 
 var s4285_map = new Uint32Array(200*200);
@@ -107,7 +108,7 @@ function s4285_recv(data)
 		var param = params[i].split("=");
 
 		if (0 && param[0] != "keepalive") {
-			if (typeof param[1] != "undefined")
+			if (isDefined(param[1]))
 				console.log('s4285_recv: '+ param[0] +'='+ param[1]);
 			else
 				console.log('s4285_recv: '+ param[0]);
@@ -158,24 +159,24 @@ function s4285_controls_setup()
 	var draw_s = { 0:'points', 1:'density' };
 	
 	var controls_html =
-		w3_divs('id-s4285-controls w3-text-aqua', '',
-			w3_divs('w3-container', 'w3-tspace-8',
-				w3_divs('', 'w3-medium w3-text-aqua', '<b>STANAG 4285 decoder</b>'),
+		w3_div('id-s4285-controls w3-text-aqua',
+			w3_divs('w3-container/w3-tspace-8',
+				w3_div('w3-medium w3-text-aqua', '<b>STANAG 4285 decoder</b>'),
 				w3_select('', 'Mode', '', 's4285.mode', s4285.mode, mode_s, 's4285_mode_select_cb'),
-				w3_slider('Gain', 's4285.gain', s4285.gain, 0, 100, 1, 's4285_gain_cb'),
+				w3_slider('', 'Gain', 's4285.gain', s4285.gain, 0, 100, 1, 's4285_gain_cb'),
 				w3_select('', 'Draw', '', 's4285.draw', s4285.draw, draw_s, 's4285_draw_select_cb'),
-				w3_slider('Points', 's4285.points', s4285.points, 4, 14, 1, 's4285_points_cb'),
+				w3_slider('', 'Points', 's4285.points', s4285.points, 4, 14, 1, 's4285_points_cb'),
 				w3_button('', 'Clear', 's4285_clear_cb'),
-				w3_divs('', 'w3-text-aqua',
+				w3_div('w3-text-aqua',
 					'<b>Status:</b>',
-					w3_divs('', 'id-s4285-status w3-small w3-text-white', '')
+					w3_div('id-s4285-status w3-small w3-text-white')
 				)
 			)
 		);
 
 	ext_panel_show(controls_html, data_html, null);
 	time_display_setup('s4285');
-	s4285_resize();
+	s4285_environment_changed( {resize:1} );
 
 	s4285_canvas = w3_el('id-s4285-canvas');
 	s4285_canvas.ctx = s4285_canvas.getContext("2d");
@@ -189,8 +190,9 @@ function s4285_controls_setup()
 	s4285_clear();
 }
 
-function s4285_resize()
+function s4285_environment_changed(changed)
 {
+   if (!changed.resize) return;
 	var el = w3_el('id-s4285-data');
 	var left = (window.innerWidth - 200 - time_display_width()) / 2;
 	el.style.left = px(left);
@@ -248,19 +250,5 @@ function s4285_blur()
 // called to display HTML for configuration parameters in admin interface
 function s4285_config_html()
 {
-	ext_admin_config(s4285_ext_name, 's4285',
-		w3_divs('id-s4285 w3-text-teal w3-hide', '',
-			'<b>s4285 configuration</b>' +
-			'<hr>' +
-			''
-			/*
-			w3_third('', 'w3-container',
-				w3_divs('', 'w3-margin-bottom',
-					w3_input_get_param('int1', 's4285.int1', 'w3_num_cb'),
-					w3_input_get_param('int2', 's4285.int2', 'w3_num_cb')
-				), '', ''
-			)
-			*/
-		)
-	);
+   ext_config_html(s4285, 's4285', 'S4285', 'S4285 configuration');
 }

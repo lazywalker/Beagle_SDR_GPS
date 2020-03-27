@@ -161,6 +161,8 @@
 #include <pwd.h>
 #include <time.h>
 
+#define KIWISDR
+
 // user errors
 #define KIWI_ERR_ACCT           100
 #define KIWI_ERR_NO_HOSTS       101
@@ -625,13 +627,13 @@ void Usage()
     if (handle_config_error(parse_config()) != SUCCESS) 
         return FATALERR;
 
-        /* drop root privileges after reading config */
-        if (geteuid() == 0) {
-            if ((nobody = getpwnam("nobody")) != NULL) { // if "nobody" exists
+    /* drop root privileges after reading config */
+    if (geteuid() == 0) {
+        if ((nobody = getpwnam("nobody")) != NULL) { // if "nobody" exists
             setgid(nobody->pw_gid);
             setegid(nobody->pw_gid);
-                setuid(nobody->pw_uid);
-                seteuid(nobody->pw_uid);
+            setuid(nobody->pw_uid);
+            seteuid(nobody->pw_uid);
         }
     }
 
@@ -1086,46 +1088,47 @@ int run_as_background()
         fclose(stdin);
         syslog(LOG_INFO, "v%s daemon started%s\n", 
             VERSION, (nat) ?  " with NAT enabled" : "");
+
         while (background) {
             delay = MAX(60, my_instance->interval * 60);
             if (nat)
-            get_our_visible_IPaddr(IPaddress);
+                get_our_visible_IPaddr(IPaddress);
             else
-            getip(IPaddress, device);
+                getip(IPaddress, device);
             if (startup) {
-            startup = 0;
-            my_instance->Last_IP_Addr[0] =  '0';// force  check
+                startup = 0;
+                my_instance->Last_IP_Addr[0] =  '0';// force  check
             }
 #ifdef DEBUG
             if (my_instance->debug)  {
-                Msg("! Last_IP_Addr = %s, IP = %s",my_instance->Last_IP_Addr, IPaddress);
+                Msg("! Last_IP_Addr = %s, IP = %s", my_instance->Last_IP_Addr, IPaddress);
 #if FORCE_UPDATE
-            Msg("Force_Update == %d\n", Force_Update);
+                Msg("Force_Update == %d\n", Force_Update);
 #endif
             }
 #endif
             if (*IPaddress) { 
-            if (strcmp(IPaddress, my_instance->Last_IP_Addr)) {
-                if (dynamic_update() == SUCCESS) 
-                strncpy(my_instance->Last_IP_Addr, IPaddress,
-                                    IPLEN);
-                if (connect_fail)
-                delay = MAX(300, delay); // wait at least 5 minutes more
-                *IPaddress = 0;
-            }
+                if (strcmp(IPaddress, my_instance->Last_IP_Addr) || kiwi_mode) {
+                    if (dynamic_update() == SUCCESS) 
+                        strncpy(my_instance->Last_IP_Addr, IPaddress, IPLEN);
+                    if (connect_fail)
+                        delay = MAX(300, delay); // wait at least 5 minutes more
+                    *IPaddress = 0;
+                }
             }
 #if FORCE_UPDATE
             if (Force_Update < 0) {
-            if (force_update() == SUCCESS)
-                Force_Update = FORCE_INTERVAL;
+                if (force_update() == SUCCESS)
+                    Force_Update = FORCE_INTERVAL;
             } else {    // one time quanta closer to update trigger
-            Force_Update -= my_instance->interval;
+                Force_Update -= my_instance->interval;
             }
 #endif
             if (background) // signal may have reset this!
-            Sleep(delay);
+                Sleep(delay);
         }
-                syslog(LOG_INFO, "v%s daemon ended.\n", VERSION);
+        
+        syslog(LOG_INFO, "v%s daemon ended.\n", VERSION);
         break;
     }
     return SUCCESS;
@@ -1311,25 +1314,28 @@ void get_one_config(char *name)
     char    *req, *expth;
     struct  CONFIG *cfg;
 
-        fd = open(name, O_RDONLY);
-        size = sizeof(struct CONFIG);
-        cfg = (struct CONFIG *)Malloc(size);
-        read(fd, cfg, size);
-        size = cfg->rlength;
-        interval = cfg->interval;
-        nat = cfg->nat;
-        strcpy(device, cfg->device);
-        req = (char *)Malloc(size + IPLEN); // allow for bdecode expansion
-        read(fd, req, size);
-        req[size] = 0;
-        size = cfg->elength;
+    fd = open(name, O_RDONLY);
+    size = sizeof(struct CONFIG);
+    cfg = (struct CONFIG *)Malloc(size);
+    read(fd, cfg, size);
+    size = cfg->rlength;
+    interval = cfg->interval;
+    nat = cfg->nat;
+    strcpy(device, cfg->device);
+    req = (char *)Malloc(size + IPLEN); // allow for bdecode expansion
+    read(fd, req, size);
+    req[size] = 0;
+    size = cfg->elength;
+
     if (size) {
-            expth = (char *)Malloc(size);
-            read(fd, expth, size);
+        expth = (char *)Malloc(size);
+        read(fd, expth, size);
         expth[size] = 0;
-    } else
+    } else {
         expth = NULL;
-        close(fd);
+    }
+
+    close(fd);
     free(cfg);
     display_one_config(req, interval, nat, device, expth);
     free(req);
@@ -1740,8 +1746,10 @@ int handle_dynup_error(int error_code)
     switch (error_code) {
         case ALREADYSET:
         case ALREADYSETGRP:
+#ifndef KIWISDR
         syslog(LOG_INFO, "%s was already set to %s.", 
                             ourname, IPaddress);
+#endif
         return SUCCESS;
             case BADHOST:
         Msg("No host '%s' found at %s.", ourname, NOIP_NAME);
@@ -2009,18 +2017,18 @@ int yesno(const char *fmt, ...)
         va_end(ap);
 
     fprintf(stderr, "%s", msg);
-        tcgetattr(0,&argin);
-        argout = argin;                                                        
-        argout.c_lflag &= ~(ICANON);
-        argout.c_iflag &= ~(ICRNL);
-        argout.c_oflag &= ~(OPOST);
-        argout.c_cc[VMIN] = 1;
-        argout.c_cc[VTIME] = 0;
-        tcsetattr(0,TCSADRAIN,&argout);
+    tcgetattr(0,&argin);
+    argout = argin;                                                        
+    argout.c_lflag &= ~(ICANON);
+    argout.c_iflag &= ~(ICRNL);
+    argout.c_oflag &= ~(OPOST);
+    argout.c_cc[VMIN] = 1;
+    argout.c_cc[VTIME] = 0;
+    tcsetattr(0,TCSADRAIN,&argout);
     read(0, answer, 1);
     if (*answer != '\n')
         puts("\r");
-        tcsetattr(0,TCSADRAIN,&argin);
+    tcsetattr(0,TCSADRAIN,&argin);
     if ((*answer == 'y') || (*answer == 'Y'))
         return 1;   
     return 0;

@@ -20,18 +20,29 @@ Boston, MA  02110-1301, USA.
 #include "types.h"
 #include "config.h"
 #include "kiwi.h"
+#include "valgrind.h"
+#include "rx.h"
 #include "clk.h"
 #include "misc.h"
 #include "str.h"
 #include "web.h"
 #include "peri.h"
+#include "eeprom.h"
+#include "spi.h"
 #include "spi_dev.h"
 #include "gps.h"
 #include "coroutines.h"
-#include "pru_realtime.h"
-#include "debug.h"
 #include "cfg.h"
 #include "net.h"
+#include "ext_int.h"
+#include "sanitizer.h"
+#include "shmem.h"
+
+#include "debug.h"
+
+#ifdef EV_MEAS
+    #warning NB: EV_MEAS is enabled
+#endif
 
 #include <string.h>
 #include <stdio.h>
@@ -46,29 +57,37 @@ Boston, MA  02110-1301, USA.
 #include <errno.h>
 
 int version_maj, version_min;
+int fw_sel, fpga_id, rx_chans, wf_chans, nrx_bufs, nrx_samps, nrx_samps_loop, nrx_samps_rem,
+    snd_rate, rx_decim;
 
 int p0=0, p1=0, p2=0, wf_sim, wf_real, wf_time, ev_dump=0, wf_flip, wf_start=1, tone, down,
 	rx_cordic, rx_cic, rx_cic2, rx_dump, wf_cordic, wf_cic, wf_mult, wf_mult_gen, do_slice=-1,
-	rx_yield=1000, gps_chans=GPS_CHANS, spi_clkg, spi_speed=SPI_48M, wf_max, rx_num=RX_CHANS, wf_num=RX_CHANS,
-	do_gps, do_sdr=1, navg=1, wf_olap, meas, spi_delay=100, do_fft, do_dyn_dns=1, debian_ver,
+	rx_yield=1000, gps_chans=GPS_CHANS, spi_clkg, spi_speed=SPI_48M, wf_max, rx_num, wf_num,
+	do_gps, do_sdr=1, navg=1, wf_olap, meas, spi_delay=100, do_fft, debian_ver,
 	noisePwr=-160, unwrap=0, rev_iq, ineg, qneg, fft_file, fftsize=1024, fftuse=1024, bg, alt_port,
 	color_map, print_stats, ecpu_cmds, ecpu_tcmds, use_spidev, debian_maj, debian_min,
-	gps_debug, gps_var, gps_lo_gain, gps_cg_gain;
+	gps_debug, gps_var, gps_lo_gain, gps_cg_gain, use_foptim, is_locked, drm_nreg_chans;
 
-bool create_eeprom, need_hardware, no_net, test_flag, sdr_hu_debug, have_ant_switch_ext, gps_e1b_only,
-    disable_led_task;
+u4_t ov_mask, snd_intr_usec;
+
+bool create_eeprom, need_hardware, test_flag, sdr_hu_debug, have_ant_switch_ext, gps_e1b_only,
+    disable_led_task, is_BBAI, kiwi_restart, debug_printfs;
 
 char **main_argv;
+char *fpga_file;
 
 int main(int argc, char *argv[])
 {
-	u2_t *up;
 	int i;
 	int p_gps=0;
 	bool ext_clk = false;
 	
 	version_maj = VERSION_MAJ;
 	version_min = VERSION_MIN;
+	
+	#ifdef CPU_AM5729
+	    is_BBAI = true;
+	#endif
 	
 	main_argv = argv;
 	
@@ -77,23 +96,32 @@ int main(int argc, char *argv[])
 		p_gps = -1;
 	#else
 		// enable generation of core file in /tmp
-		scall("core_pattern", system("echo /tmp/core-%e-%s-%u-%g-%p-%t > /proc/sys/kernel/core_pattern"));
+		//scall("core_pattern", system("echo /tmp/core-%e-%s-%p-%t > /proc/sys/kernel/core_pattern"));
+		
+		// use same filename to prevent looping dumps from filling up filesystem
+		scall("core_pattern", system("echo /tmp/core-%e > /proc/sys/kernel/core_pattern"));
 		const struct rlimit unlim = { RLIM_INFINITY, RLIM_INFINITY };
 		scall("setrlimit", setrlimit(RLIMIT_CORE, &unlim));
+		system("rm -f /tmp/core-kiwi.*-*");     // remove old core files
+		set_cpu_affinity(0);
 	#endif
 	
 	kstr_init();
+	shmem_init();
+	printf_init();
 
 	for (i=1; i<argc; ) {
 		if (strcmp(argv[i], "-test")==0) test_flag = TRUE;
 		if (strcmp(argv[i], "-sdr_hu")==0) sdr_hu_debug = TRUE;
 		if (strcmp(argv[i], "-bg")==0) { background_mode = TRUE; bg=1; }
+		if (strcmp(argv[i], "-fopt")==0) use_foptim = 1;    // in EDATA_DEVEL mode use foptim version of files
 		if (strcmp(argv[i], "-down")==0) down = 1;
 		if (strcmp(argv[i], "+gps")==0) p_gps = 1;
 		if (strcmp(argv[i], "-gps")==0) p_gps = -1;
 		if (strcmp(argv[i], "+sdr")==0) do_sdr = 1;
 		if (strcmp(argv[i], "-sdr")==0) do_sdr = 0;
 		if (strcmp(argv[i], "+fft")==0) do_fft = 1;
+		if (strcmp(argv[i], "-debug")==0) debug_printfs = true;
 
 		if (strcmp(argv[i], "-gps_debug")==0) {
 		    errno = 0;
@@ -120,7 +148,7 @@ int main(int argc, char *argv[])
 		if (strcmp(argv[i], "-e1b_cg_gain")==0) { i++; gps_cg_gain = strtol(argv[i], 0, 0); printf("e1b_cg_gain %d\n", gps_cg_gain); }
 
 		if (strcmp(argv[i], "-debian")==0) { i++; debian_ver = strtol(argv[i], 0, 0); }
-		if (strcmp(argv[i], "-ctrace")==0) web_caching_debug = true;
+		if (strcmp(argv[i], "-ctrace")==0) { i++; web_caching_debug = strtol(argv[i], 0, 0); }
 		if (strcmp(argv[i], "-ext")==0) ext_clk = true;
 		if (strcmp(argv[i], "-use_spidev")==0) { i++; use_spidev = strtol(argv[i], 0, 0); }
 		if (strcmp(argv[i], "-eeprom")==0) create_eeprom = true;
@@ -189,6 +217,10 @@ int main(int argc, char *argv[])
         lprintf("/etc/debian_version %d.%d\n", debian_maj, debian_min);
     }
     
+    #if defined(USE_ASAN)
+    	lprintf("### compiled with USE_ASAN\n");
+    #endif
+    
     #if defined(HOST) && defined(USE_VALGRIND)
     	lprintf("### compiled with USE_VALGRIND\n");
     #endif
@@ -200,17 +232,98 @@ int main(int argc, char *argv[])
     assert (NOT_FOUND != TRUE);
     assert (NOT_FOUND != FALSE);
     
+    struct stat st;
+    debug_printfs |= (stat(DIR_CFG "/opt.debug", &st) == 0);
+
+    // on reboot let ntpd and other stuff settle first
     if (background_mode) {
-    	lprintf("background mode: delaying start 30 secs...\n");
-    	sleep(30);
+        lprintf("background mode: delaying start 30 secs...\n");
+        sleep(30);
     }
     
-    clock_init();
 
 	TaskInit();
+    cfg_reload();
+    clock_init();
 
-    cfg_reload(CALLED_FROM_MAIN);
+    bool err;
+    fw_sel = admcfg_int("firmware_sel", &err, CFG_OPTIONAL);
+    if (err) fw_sel = FW_SEL_SDR_RX4_WF4;
     
+    if (fw_sel == FW_SEL_SDR_RX4_WF4) {
+        fpga_id = FPGA_ID_RX4_WF4;
+        rx_chans = 4;
+        wf_chans = 4;
+        snd_rate = SND_RATE_4CH;
+        snd_intr_usec = SND_INTR_4CH;
+        rx_decim = RX_DECIM_4CH;
+        nrx_bufs = RXBUF_SIZE_4CH / NRX_SPI;
+        lprintf("firmware: SDR_RX4_WF4\n");
+    } else
+    if (fw_sel == FW_SEL_SDR_RX8_WF2) {
+        fpga_id = FPGA_ID_RX8_WF2;
+        rx_chans = 8;
+        wf_chans = 2;
+        snd_rate = SND_RATE_8CH;
+        snd_intr_usec = SND_INTR_8CH;
+        rx_decim = RX_DECIM_8CH;
+        nrx_bufs = RXBUF_SIZE_8CH / NRX_SPI;
+        lprintf("firmware: SDR_RX8_WF2\n");
+    } else
+    if (fw_sel == FW_SEL_SDR_RX3_WF3) {
+        fpga_id = FPGA_ID_RX3_WF3;
+        rx_chans = 3;
+        wf_chans = 3;
+        snd_rate = SND_RATE_3CH;
+        snd_intr_usec = SND_INTR_3CH;
+        rx_decim = RX_DECIM_3CH;
+        nrx_bufs = RXBUF_SIZE_3CH / NRX_SPI;
+        lprintf("firmware: SDR_RX3_WF3\n");
+    } else
+    if (fw_sel == FW_SEL_SDR_RX14_WF0) {
+        fpga_id = FPGA_ID_RX14_WF0;
+        rx_chans = 14;
+        wf_chans = 0;
+        snd_rate = SND_RATE_14CH;
+        snd_intr_usec = SND_INTR_14CH;
+        rx_decim = RX_DECIM_14CH;
+        nrx_bufs = RXBUF_SIZE_14CH / NRX_SPI;
+        lprintf("firmware: SDR_RX14_WF0\n");
+    } else
+    if (VAL_CFG_GPS_ONLY) {
+        fpga_id = FPGA_ID_GPS;
+        lprintf("firmware: GPS_ONLY\n");
+    } else
+        panic("fw_sel");
+    
+    asprintf(&fpga_file, "rx%d.wf%d", rx_chans, wf_chans);
+    
+    bool no_wf = cfg_bool("no_wf", &err, CFG_OPTIONAL);
+    if (err) no_wf = false;
+    if (no_wf) wf_chans = 0;
+
+    lprintf("firmware: rx_chans=%d wf_chans=%d\n", rx_chans, wf_chans);
+
+    assert(rx_chans <= MAX_RX_CHANS);
+    assert(wf_chans <= MAX_WF_CHANS);
+
+    nrx_samps = NRX_SAMPS_CHANS(rx_chans);
+    nrx_samps_loop = nrx_samps * rx_chans / NRX_SAMPS_RPT;
+    nrx_samps_rem = (nrx_samps * rx_chans) - (nrx_samps_loop * NRX_SAMPS_RPT);
+    lprintf("firmware: NRX bufs=%d samps=%d loop=%d rem=%d\n",
+        nrx_bufs, nrx_samps, nrx_samps_loop, nrx_samps_rem);
+
+    assert(nrx_bufs <= MAX_NRX_BUFS);
+    assert(nrx_samps <= MAX_NRX_SAMPS);
+    assert(nrx_samps < FASTFIR_OUTBUF_SIZE);    // see data_pump.h
+
+    lprintf("firmware: NWF xfer=%d samps=%d rpt=%d loop=%d rem=%d\n",
+        NWF_NXFER, NWF_SAMPS, NWF_SAMPS_RPT, NWF_SAMPS_LOOP, NWF_SAMPS_REM);
+
+    rx_num = rx_chans, wf_num = wf_chans;
+    
+	TaskInitCfg();
+
     do_gps = admcfg_bool("enable_gps", NULL, CFG_REQUIRED);
     if (p_gps != 0) do_gps = (p_gps == 1)? 1:0;
     
@@ -226,28 +339,26 @@ int main(int argc, char *argv[])
 		//pru_start();
 		eeprom_update();
 		
+		bool ext_ADC_clk = cfg_bool("ext_ADC_clk", &err, CFG_OPTIONAL);
+		if (err) ext_ADC_clk = false;
+		
 		u2_t ctrl = CTRL_EEPROM_WP;
 		ctrl_clr_set(0xffff, ctrl);
-		if (adc_clock_enable & !ext_clk) ctrl |= CTRL_OSC_EN;
+		if (!(ext_clk || ext_ADC_clk)) ctrl |= CTRL_OSC_EN;
 		ctrl_clr_set(0, ctrl);
 
-		if (ctrl & CTRL_OSC_EN)
-			printf("ADC_CLOCK: %.6f MHz\n", ADC_CLOCK_NOM/MHz);
-		else
-			printf("ADC_CLOCK: EXTERNAL, J5 connector\n");
-		
 		// read device DNA
 		ctrl_clr_set(CTRL_DNA_CLK | CTRL_DNA_SHIFT, CTRL_DNA_READ);
 		ctrl_positive_pulse(CTRL_DNA_CLK);
 		ctrl_clr_set(CTRL_DNA_CLK | CTRL_DNA_READ, CTRL_DNA_SHIFT);
-		ddns.dna = 0;
+		net.dna = 0;
 		for (int i=0; i < 64; i++) {
 		    stat_reg_t stat = stat_get();
-		    ddns.dna = (ddns.dna << 1) | ((stat.word & STAT_DNA_DATA)? 1ULL : 0ULL);
+		    net.dna = (net.dna << 1) | ((stat.word & STAT_DNA_DATA)? 1ULL : 0ULL);
 		    ctrl_positive_pulse(CTRL_DNA_CLK);
 		}
 		ctrl_clr_set(CTRL_DNA_CLK | CTRL_DNA_READ | CTRL_DNA_SHIFT, 0);
-		printf("device DNA %08x|%08x\n", PRINTF_U64_ARG(ddns.dna));
+		printf("device DNA %08x|%08x\n", PRINTF_U64_ARG(net.dna));
 	}
 	
 	if (do_fft) {
@@ -259,7 +370,7 @@ int main(int argc, char *argv[])
 	
 	rx_server_init();
 
-#if RX_CHANS
+#ifndef CFG_GPS_ONLY
 	extint_setup();
 #endif
 
@@ -276,8 +387,12 @@ int main(int argc, char *argv[])
 	while (TRUE) {
 	
 		TaskCollect();
-		TaskCheckStacks();
+		TaskCheckStacks(false);
 
 		TaskSleepReasonSec("main loop", 10);
+		
+		#ifdef USE_ASAN
+		    if (kiwi_restart) kiwi_exit(0);
+		#endif
 	}
 }

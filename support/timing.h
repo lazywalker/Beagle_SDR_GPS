@@ -24,15 +24,13 @@
 #include "types.h"
 #include "timer.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif // __cplusplus
-
 #define	MINUTES_TO_SEC(min)	((min) * 60)
 #define	SEC_TO_MINUTES(sec)	((sec) / 60)
 #define	SEC_TO_MSEC(sec)	((sec) * 1000)
 #define	SEC_TO_USEC(sec)	((sec) * 1000000)
 #define	MSEC_TO_USEC(msec)	((msec) * 1000)
+
+#define TIME_DIFF_MS(now, start) ((float) ((now) - (start)) / 1e3)
 
 u4_t time_diff(u4_t next, u4_t prev);
 s64_t time_diff_s(u4_t next, u4_t prev);
@@ -41,8 +39,6 @@ u64_t time_diff48(u64_t next, u64_t prev);
 void spin_ms(u4_t msec);
 void spin_us(u4_t usec);
 
-#ifdef __cplusplus
-}
-#endif // __cplusplus
-
+void kiwi_usleep(u4_t usec);
+#define kiwi_msleep(msec) kiwi_usleep((msec) * 1000)
 #endif

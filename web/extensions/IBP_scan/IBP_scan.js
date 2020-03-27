@@ -24,7 +24,7 @@ function ibp_recv_msg(data)
       var param = params[i].split("=");
 
 /*    if (param[0] != "keepalive") {
-         if (typeof param[1] != "undefined")
+         if (isDefined(param[1]))
             console.log('ibp_recv: '+ param[0] +'='+ param[1]);
          else
             console.log('ibp_recv: '+ param[0]);
@@ -56,45 +56,33 @@ function ibp_controls_setup() {
       );
 
    var controls_html =
-      w3_divs('id-tc-controls w3-text-white', '',
+      w3_div('id-tc-controls w3-text-white',
          w3_div('w3-medium w3-text-aqua',
             '<b><a href="http://www.ncdxf.org/beacon/index.html">International Beacon Project</a> (IBP) Scanner</b>'
          ),
 
-         w3_col_percent('', '',
+         w3_col_percent('',
             w3_div('', 'by VE3SUN'), 25,
             w3_div('', 'Info: <b><a href="http://ve3sun.com/KiwiSDR/IBP.html" target="_blank">ve3sun.com/KiwiSDR/IBP</a></b>'), 55,
             '', 10
          ),
          
-         w3_col_percent('', '',
-            w3_table('w3-table-fixed w3-centered',
-               w3_table_row('',
-                  w3_table_cells('|width:25%;',
-                     w3_divs('w3-margin-T-8', 'w3-show-inline w3-left w3-margin-right', IBP_select )
-                  ),
-                  
-                  w3_table_cells('',
-                     w3_divs('w3-margin-T-8', 'cl-ibp-annotate-checkbox w3-padding-L-16',
-                        '<input id="id-IBP-Annotate" type="checkbox" value="" checked> Annotate Waterfall'
-                     )
-                  ),
-                  
-                  w3_table_cells('',
-                     w3_divs('w3-margin-T-8', 'cl-ibp-annotate-checkbox',
-                        '<input id="id-IBP-Autosave" type="checkbox" value="" onclick="IBP_Autosave(this.checked)"> Autosave PNG'
-                     )
-                  )
-               )
-            ), 100
+         w3_inline('w3-halign-space-between|width:90%;/',
+            w3_divs('w3-margin-T-8/w3-show-inline w3-left w3-margin-right', IBP_select),
+            w3_divs('w3-margin-T-8/cl-ibp-annotate-checkbox w3-padding-L-16',
+               '<input id="id-IBP-Annotate" class="w3-pointer" type="checkbox" value="" checked> Annotate Waterfall'
+            ),
+            w3_divs('w3-margin-T-8/cl-ibp-annotate-checkbox',
+               '<input id="id-IBP-Autosave" class="w3-pointer" type="checkbox" value="" onclick="IBP_Autosave(this.checked)"> Autosave PNG'
+            )
          )
       );
    
    //console.log('ibp_controls_setup');
    ext_panel_show(controls_html, data_html, null);
-   ext_set_controls_width_height(450, 90);
+   ext_set_controls_width_height(475, 90);
    time_display_setup('IBP_scan');
-   IBP_scan_resize();
+	IBP_environment_changed( {resize:1} );
    
    // use extension parameter as beacon station call (or 'cycle' for cycle mode)
    // e.g. kiwisdr.local:8073/?ext=ibp,4u1un (upper or lowercase)
@@ -167,8 +155,9 @@ function ibp_controls_setup() {
 }
 
 
-function IBP_scan_resize()
+function IBP_environment_changed(changed)
 {
+   if (!changed.resize) return;
    var el = w3_el('id-IBP-report');
    var left = (window.innerWidth - 1024 - time_display_width()) / 2;
    el.style.left = px(left);
@@ -190,13 +179,13 @@ function IBP_Autosave(ch){
 var IBP_monitorBeacon = -1;
 var IBP_sound = false;
 var IBP_band = 0;
-var IBP_muted = (typeof muted != "undefined")? muted : 0;
+var IBP_muted = isDefined(muted)? muted : 0;
 var IBP_bands = [ "IBP 20m", "IBP 17m", "IBP 15m", "IBP 12m", "IBP 10m" ];
 
 
-var IBP_select = '<select id="select-IBP" onchange="set_IBP(this.value)"><option value="-2" selected="" disabled="">IBP</option><option value="-1">OFF</option>';
+var IBP_select = '<select id="select-IBP" class="w3-pointer" onchange="set_IBP(this.value)"><option value="-2" selected="" disabled="">IBP</option><option value="-1">OFF</option>';
 
-    if (typeof dx_ibp != "undefined") {
+    if (isDefined(dx_ibp)) {
        for( var i=0; i<18; i++) { IBP_select += '<option value="'+i+'">'+dx_ibp[i*2]+'</option>'; }
        IBP_select += '<option value="-1" disabled><b>By band:</b></option>';
        IBP_select += '<option value="20">All Bands</option>';
@@ -377,8 +366,8 @@ function IBP_scan_plot( oneline_image )
       {
       if ( muted && (IBP_monitorBeacon == beaconN) )
          {
-         toggle_mute();
-         setTimeout(function() { toggle_mute()}, 50000 );
+         toggle_or_set_mute();
+         setTimeout(function() { toggle_or_set_mute()}, 50000 );
          }
       ctx.fillStyle="#000055";
       ctx.fillRect(plot_x,plot_y,50,35);
