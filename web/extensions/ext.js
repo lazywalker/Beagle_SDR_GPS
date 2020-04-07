@@ -2,7 +2,9 @@
 
 var extint = {
    ws: null,
+   extname: null,
    param: null,
+   override_pb: false,
    displayed: false,
    help_displayed: false,
    current_ext_name: null,
@@ -133,13 +135,12 @@ var extint_ext_is_tuning = false;
 
 // mode, zoom and passband are optional
 function ext_tune(freq_dial_kHz, mode, zoom, zoom_level, low_cut, high_cut) {
+   var pb_specified = (low_cut != undefined && high_cut != undefined);
 	//console.log('ext_tune: '+ freq_dial_kHz +', '+ mode +', '+ zoom +', '+ zoom_level);
 	
 	extint_ext_is_tuning = true;
       freqmode_set_dsp_kHz(freq_dial_kHz, mode);
-      
-      if (low_cut != undefined && high_cut != undefined)
-         ext_set_passband(low_cut, high_cut);
+      if (pb_specified) ext_set_passband(low_cut, high_cut);
       
       if (zoom != undefined) {
          zoom_step(zoom, zoom_level);
