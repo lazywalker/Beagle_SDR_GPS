@@ -6763,6 +6763,11 @@ function panels_setup()
 	de_emphasis = readCookie('last_de_emphasis');
 	if (de_emphasis == null) de_emphasis = 0;
 
+	// volume
+	volume = readCookie('volume');
+	if (volume == null) volume = 0;
+	if (volume < volume_default) volume = volume_default;
+
 	pan = readCookie('last_pan');
 	if (pan == null) pan = 0;
 
@@ -7312,7 +7317,8 @@ function toggle_or_set_spec_peak(set, val)
 
 var muted_until_freq_set = true;
 var muted = false;
-var volume = 50;
+var volume_default = 50
+var volume = volume_default;
 var f_volume = 0;
 var recording = false;
 
@@ -7322,8 +7328,9 @@ function setvolume(done, str)
    volume = Math.max(0, Math.min(200, volume));
    f_volume = muted? 0 : volume/100;
    if (done) {
-      w3_set_value('id-input-volume', volume);
-      freqset_select();
+	   w3_set_value('id-input-volume', volume);
+	   freqset_select();
+	   writeCookie('volume', volume);
    }
 }
 
